@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 
 import boto3
 
@@ -24,6 +25,10 @@ def build_code_artifact(
             "entryPoint": [entry_point],
         }
     }
+
+
+def artifact_type(artifact: dict) -> str:
+    return next(iter(artifact))
 
 
 def main() -> None:
@@ -74,13 +79,44 @@ def main() -> None:
         }
         existing = runtimes.get(name)
         if existing:
-            client.update_agent_runtime(
-                agentRuntimeId=existing["agentRuntimeId"],
-                **common,
-            )
-            return existing["agentRuntimeId"]
-        response = client.create_agent_runtime(agentRuntimeName=name, **common)
-        return response["agentRuntimeId"]
+            runtime_id = existing["agentRuntimeId"]
+            details = client.get_agent_runtime(agentRuntimeId=runtime_id)
+            if artifact_type(details["agentRuntimeArtifact"]) != artifact_type(
+                runtime_artifact
+            ):
+                client.delete_agent_runtime(agentRuntimeId=runtime_id)
+                deadline = time.monotonic() + 600
+                while time.monotonic() < deadline:
+                    try:
+                        client.get_agent_runtime(agentRuntimeId=runtime_id)
+                    except client.exceptions.ResourceNotFoundException:
+                        break
+                    time.sleep(5)
+                else:
+                    raise TimeoutError(
+                        f"runtime {name} was not deleted within 600 seconds"
+                    )
+                existing = None
+            else:
+                client.update_agent_runtime(
+                    agentRuntimeId=runtime_id,
+                    **common,
+                )
+        if not existing:
+            response = client.create_agent_runtime(
+                agentRuntimeName=name, **common)
+            runtime_id = response["agentRuntimeId"]
+
+        deadline = time.monotonic() + 600
+        while time.monotonic() < deadline:
+            details = client.get_agent_runtime(agentRuntimeId=runtime_id)
+            status = details["status"]
+            if status == "READY":
+                return runtime_id
+            if status in {"CREATE_FAILED", "UPDATE_FAILED"}:
+                raise RuntimeError(f"runtime {name} entered status {status}")
+            time.sleep(5)
+        raise TimeoutError(f"runtime {name} was not ready within 600 seconds")
 
     tools_id = upsert(
         "sharepoint_temporal_tools",

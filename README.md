@@ -114,6 +114,12 @@ stack removes the obsolete CodeBuild project. The old ECR repository may remain
 because it was configured with `DeletionPolicy: Retain`; it is not used by the
 CodeZip runtimes and can be removed separately after verification.
 
+AgentCore does not permit changing a runtime artifact from container to CodeZip
+in place. During the first migration deployment, the script deletes and
+recreates the two legacy runtimes under the same logical names, then waits for
+each replacement to become ready. Expect temporary runtime downtime during that
+one-time migration.
+
 ### Invoke the orchestrator
 
 `scripts/ask_aws.py` is a convenience client, not the application entry point.

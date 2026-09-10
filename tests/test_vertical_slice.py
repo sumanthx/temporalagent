@@ -17,7 +17,7 @@ from temporal_agent.server import principal_from_headers
 from temporal_agent.store import TemporalGraphStore
 from temporal_agent.tools import SharePointTools
 from aws_lambda.handlers import _repair_valid_intervals
-from scripts.deploy_runtimes import build_code_artifact
+from scripts.deploy_runtimes import artifact_type, build_code_artifact
 
 
 class VerticalSliceTests(unittest.TestCase):
@@ -225,6 +225,7 @@ class VerticalSliceTests(unittest.TestCase):
             tools["codeConfiguration"]["code"],
             orchestrator["codeConfiguration"]["code"],
         )
+        self.assertEqual("codeConfiguration", artifact_type(tools))
 
     def test_bedrock_agent_selects_allowlisted_tool(self):
         class FakeBedrock:

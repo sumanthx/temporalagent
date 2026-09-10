@@ -284,6 +284,12 @@ policy, so CloudFormation can leave it behind as an unused resource. Delete it
 only after both AgentCore runtimes report a CodeZip `codeConfiguration` and the
 orchestrator-to-MCP path has been tested.
 
+AgentCore rejects an in-place artifact-type change. The deployment script
+therefore deletes and recreates a legacy container runtime when its desired
+artifact is CodeZip, preserving the logical runtime name but causing temporary
+downtime during the one-time migration. It waits for the new MCP runtime before
+creating the orchestrator that references its ARN.
+
 ## 11. Optional future Neptune path
 
 Neptune is disabled by default and is not queried by the current application.
