@@ -1,166 +1,148 @@
 # SharePoint Temporal Query Agent — Design
 
-Status: implemented vertical slice with deployed AWS infrastructure  
-Last updated: 2026-09-10  
-Source system status: SharePoint and Microsoft Graph are mocked
+Status: implemented local vertical slice and AWS deployment boundary
+Last updated: 2026-09-10
+Source status: SharePoint and Microsoft Graph are mocked
 
 ## 1. Purpose
 
-This system answers natural-language questions about current and historical
-SharePoint content while preserving evidence lineage and enforcing current
-access policy.
+The application answers natural-language questions about current and historical
+SharePoint content while preserving source lineage and enforcing current access.
 
-Representative questions include:
+Examples:
 
 - Who owned Atlas on 2024-02-01?
 - What changed about Atlas between two dates?
-- Which retention policy was effective on a given date?
-- What conflicting claims existed, and which source versions support them?
+- Which policy was effective on a given date?
+- Which conflicting claims and source versions support an answer?
 
-The design separates conversational reasoning from evidence retrieval. The
-model cannot issue arbitrary graph queries and can access data only through six
-structured MCP tools.
+The language model interprets questions and synthesizes responses. Structured
+tools remain authoritative for facts and access decisions.
 
-## 2. Goals
+## 2. Current scope
 
-- Accept natural-language temporal questions.
-- Model both business-effective time and system-recorded time.
-- Preserve immutable source versions, provenance, conflicts, and tombstones.
-- Support late and out-of-order change events.
-- Return evidence-rich answers with source artifact, source version, validity
-  interval, and citation.
-- Enforce the rule that historical evidence is returned only when the caller
-  currently has access to the source document.
-- Keep the source connector replaceable so Microsoft Graph can replace the mock.
-- Preserve deployable boundaries for AgentCore Runtime and Gateway, SQS, S3,
-  DynamoDB, Neptune Analytics, Bedrock Knowledge Bases, and S3 Vectors.
+Implemented:
 
-## 3. Non-goals
+- local deterministic demo
+- Bedrock-powered AgentCore orchestrator
+- separate MCP tools runtime
+- mock current search, exact versions, delta events and authorization
+- bitemporal facts, tombstones, provenance and citations
+- SQS/Lambda ingestion with event idempotency
+- DynamoDB and S3 persistence boundaries
+- Cognito workload authentication
 
-- Production Microsoft Graph or Entra ID integration.
-- A general-purpose graph-query interface.
-- Reconstructing evidence that is no longer authorized.
-- Treating SharePoint modification time as business-effective time.
-- Making the language model the system of record.
+Not implemented:
 
-## 4. Architecture
+- Microsoft Graph connectivity
+- Entra end-user authentication
+- transactional interval repair in Lambda
+- arbitrary graph querying
+- multi-hop relationship questions
+
+## 3. Architecture
 
 ```mermaid
 flowchart TD
-    U[Client] -->|Synchronous: OAuth JWT + prompt| O
+    U[Client] -->|Cognito JWT + prompt| O
 
     subgraph AgentCore
-      O[HTTP Orchestrator Runtime<br/>Nova Lite / Bedrock Converse]
-      T[MCP Tools Runtime<br/>six allow-listed tools]
-      G[AgentCore Gateway<br/>optional Lambda tool target]
+      O[HTTP orchestrator<br/>runtime_agent.py]
+      M[MCP tools<br/>runtime_tools.py]
     end
 
-    O -->|Synchronous: authenticated MCP JSON-RPC| T
-    O -->|Synchronous: Converse tool use| B[Amazon Bedrock]
+    Z[(S3 versioned CodeZip<br/>runtime/runtime.zip)]
+    Z -.->|entrypoint: runtime_agent.py| O
+    Z -.->|entrypoint: runtime_tools.py| M
 
-    T -->|Synchronous reads| C[MockContentSource<br/>MicrosoftGraphContentSource seam]
-    T -->|Synchronous queries| D[(DynamoDB temporal facts)]
-    T -->|Synchronous evidence retrieval| S3[(S3 immutable versions)]
+    O -->|Bedrock Converse| B[Amazon Nova Lite]
+    O -->|Cognito JWT + MCP| M
 
-    CS[Source change] -.->|Asynchronous event| Q[SQS change queue]
-    Q -.->|Asynchronous batch trigger| L[Lambda ingestion worker]
-    L -.->|Asynchronous materialization| S3
-    L -.->|Asynchronous materialization| D
-    L -.->|Asynchronous cursor/idempotency state| ST[(DynamoDB source state)]
+    M --> D[(DynamoDB temporal facts)]
+    M --> C[ContentSource<br/>mock now, Graph later]
 
-    D -.->|Asynchronous bulk projection| N[(Private Neptune Analytics graph)]
-    S3 -.->|Asynchronous ingestion job| KB[Bedrock Knowledge Base]
-    KB -.->|Asynchronous embedding writes| V[(S3 Vectors)]
+    S[Source change + exact version] -.-> Q[SQS]
+    S -.-> A[(S3 immutable versions)]
+    Q -.-> L[Lambda ingestion]
+    Z -.->|handler: aws_lambda.handlers.ingest| L
+    A -.-> L
+    L -.-> D
+    L -.-> ST[(DynamoDB event state)]
 ```
 
-Solid arrows represent the synchronous request/response query path. Dashed
-arrows represent asynchronous ingestion, projection, and indexing.
+Solid arrows are synchronous. Dashed arrows are asynchronous.
 
-### 4.1 Runtime separation
-
-The project uses two AgentCore runtimes:
+### 3.1 Runtime separation
 
 | Runtime | Protocol | Responsibility |
 |---|---|---|
-| `sharepoint_temporal_orchestrator` | HTTP, port 8080 | Accept natural language, run Nova Lite, select tools, synthesize answers |
-| `sharepoint_temporal_tools` | MCP, port 8000 | Execute structured retrieval and authorization operations |
+| `sharepoint_temporal_orchestrator` | HTTP `/invocations` | CodeZip prompt interpretation, Bedrock tool loop, cited answer |
+| `sharepoint_temporal_tools` | MCP `/mcp` | CodeZip temporal retrieval and access filtering |
 
-The orchestrator does not load DynamoDB temporal data directly. It calls the
-MCP runtime through `RemoteMCPTools`, using a short-lived Cognito
-client-credentials token.
+Both runtimes use the same immutable, versioned CodeZip artifact from S3. The
+runtime configuration selects `runtime_agent.py` for HTTP and
+`runtime_tools.py` for MCP. The MCP process still satisfies the AgentCore
+contract by listening on `0.0.0.0:8000/mcp`. No container build is required.
 
-The MCP runtime does not run a conversational model and does not expose
-`ask_temporal`.
+### 3.2 Shared artifact boundary
 
-## 5. Request flow
+| Consumer | Artifact configuration |
+|---|---|
+| HTTP orchestrator | `codeConfiguration`, Python 3.13, entrypoint `runtime_agent.py` |
+| MCP tools runtime | `codeConfiguration`, Python 3.13, entrypoint `runtime_tools.py` |
+| Lambda ingestion | Same S3 object/version, handler `aws_lambda.handlers.ingest` |
 
-### 5.1 Natural-language query
+The versioned S3 object is the deployment unit. Runtime configuration, rather
+than a separate image, selects the executable boundary. The package includes
+Linux ARM64 dependencies so it is reproducible when built from macOS or another
+developer platform.
+
+## 4. Query flow
 
 ```mermaid
 sequenceDiagram
     participant User
-    participant Orchestrator as AgentCore HTTP Orchestrator
-    participant Bedrock as Nova Lite
-    participant MCP as AgentCore MCP Tools
-    participant Store as ContentSource + DynamoDB
+    participant O as HTTP orchestrator
+    participant B as Bedrock
+    participant M as MCP tools
+    participant S as DynamoDB + ContentSource
 
-    User->>Orchestrator: POST /invocations {"prompt": "..."}
-    Orchestrator->>Bedrock: Converse(messages, tool schemas)
-    Bedrock-->>Orchestrator: toolUse(query_temporal_graph, arguments)
-    Orchestrator->>MCP: tools/call + caller principal
-    MCP->>Store: temporal query
-    MCP->>Store: current access check
-    Store-->>MCP: authorized evidence only
-    MCP-->>Orchestrator: structuredContent
-    Orchestrator->>Bedrock: toolResult(evidence)
-    Bedrock-->>Orchestrator: cited natural-language answer
-    Orchestrator-->>User: answer + evidence + tool trace
+    User->>O: POST /invocations {"prompt": "..."}
+    O->>B: Converse with six tool schemas
+    B-->>O: toolUse
+    O->>M: authenticated MCP call + demo principal
+    M->>S: temporal query
+    M->>S: current access check
+    S-->>M: authorized evidence
+    M-->>O: structured result
+    O->>B: toolResult
+    B-->>O: cited answer
+    O-->>User: answer + evidence + tool trace
 ```
 
-The model is used for interpretation, tool selection, and answer synthesis.
-Temporal facts and access decisions come exclusively from tools.
+The orchestrator never reads DynamoDB directly. The MCP runtime never runs a
+conversational model.
 
-### 5.2 Change ingestion
+## 5. Ingestion flow
 
-1. A source adapter emits a change with a stable event ID, source version ID,
-   and recorded timestamp.
-2. The event enters SQS.
-3. Lambda conditionally records the event in the source-state table.
-4. The exact immutable source version is read from S3.
-5. Extracted claims are materialized in DynamoDB.
-6. Graph projection data can be bulk imported into private Neptune Analytics.
-7. Current document content is ingested into the Bedrock Knowledge Base and
-   S3 Vector index.
+1. The source emits a stable event ID, source version ID and recorded timestamp.
+2. SQS delivers the event to Lambda at least once.
+3. Lambda conditionally records `EVENT#{event_id}` in the source-state table.
+4. Lambda reads the exact immutable version from S3.
+5. Extracted claims are inserted into the temporal-facts table.
+6. Duplicate events and duplicate fact keys are ignored.
 
-The demo seeds an authoritative temporal projection from fixtures. See
-“Known limitations” for the current incremental interval-repair gap.
+The deployed worker repairs valid-time ordering after each insert and runs with
+one reserved concurrent execution for deterministic fixture replay. Production
+ingestion must make those repairs transactional and close superseded
+`recorded_to` intervals. The local materializer uses the same valid-time
+semantics for deterministic testing.
 
-### 5.3 Processing modes
-
-The system deliberately separates query latency from ingestion latency.
-
-| Operation | Mode | Completion semantics |
-|---|---|---|
-| Natural-language query | Synchronous | The HTTP response waits for model and MCP tool results |
-| MCP tool call | Synchronous | Returns data already materialized in the query stores |
-| Source change delivery | Asynchronous | Change is accepted into SQS for later processing |
-| SQS to Lambda ingestion | Asynchronous | At-least-once delivery with event-ID idempotency |
-| S3 immutable version archival | Asynchronous | Performed by the ingestion worker |
-| DynamoDB temporal materialization | Asynchronous | Performed by the ingestion worker/materializer |
-| Neptune graph projection | Asynchronous | Bulk import task completes independently |
-| Knowledge Base indexing | Asynchronous | Bedrock ingestion job embeds and indexes documents |
-| S3 Vector updates | Asynchronous | Written as part of Knowledge Base ingestion |
-| Initial fixture bootstrap | Synchronous command | `seed_aws.py` waits for its direct uploads and writes |
-| Local fixture replay | Synchronous in-process | Intended for deterministic development and tests |
-
-The query path never waits for an SQS event, Neptune import, or Knowledge Base
-ingestion job to finish. It reads the latest successfully materialized state.
-This means source-to-query freshness is eventually consistent and should be
-measured as ingestion lag in production.
+Queries read the latest completed DynamoDB state and do not wait for ingestion.
 
 ## 6. Source abstraction
 
-`ContentSource` is the connector boundary:
+`ContentSource` defines:
 
 ```text
 changes(cursor)
@@ -173,47 +155,43 @@ check_access(document_id, principal)
 
 Implementations:
 
-- `MockContentSource`: fixture-backed and currently active.
-- `MicrosoftGraphContentSource`: interface stub for Graph delta, DriveItem
-  versions, exact version content, and current authorization.
+- `MockContentSource`: active fixture-backed implementation.
+- `MicrosoftGraphContentSource`: production seam for Graph delta, DriveItem
+  versions, exact content and current permissions.
 
-The rest of the system depends on `ContentSource`, not Microsoft Graph types.
+No Microsoft Graph type leaks beyond this boundary.
 
-## 7. MCP tool contract
+## 7. MCP contract
 
-The MCP runtime exposes exactly these tools:
+The tools runtime exposes exactly:
 
 | Tool | Purpose |
 |---|---|
 | `search_sharepoint_current` | Search currently accessible source content |
-| `resolve_entity` | Resolve a business entity name |
-| `query_temporal_graph` | Query allow-listed temporal facts by structured fields |
-| `retrieve_version_evidence` | Retrieve one exact source version |
-| `compare_document_versions` | Produce an exact-version content diff |
+| `resolve_entity` | Resolve an accessible business entity |
+| `query_temporal_graph` | Query allow-listed temporal relationships |
+| `retrieve_version_evidence` | Retrieve one exact authorized version |
+| `compare_document_versions` | Compare two exact authorized versions |
 | `check_access` | Evaluate current source access |
 
-There is no Cypher, Gremlin, SPARQL, SQL, or arbitrary graph-query tool.
+There is no raw SQL, Cypher, Gremlin or SPARQL tool.
 
-The orchestrator receives these schemas through `RemoteMCPTools` and presents
-them to Bedrock Converse. It normalizes a small set of model-produced aliases,
-such as `owned` to `owner`, before invoking MCP.
+## 8. Bitemporal model
 
-## 8. Temporal data model
+Each temporal fact contains:
 
-Each `TemporalRecord` contains:
-
-| Field | Meaning |
-|---|---|
-| `entity` | Business entity the claim concerns |
-| `relationship` | Allow-listed claim type |
-| `value` | Claim value |
-| `valid_from`, `valid_to` | Business-effective interval |
-| `recorded_from`, `recorded_to` | Interval during which the system knew the claim |
-| `document_id`, `version_id` | Immutable source identity |
-| `source_path` | Source artifact location |
-| `citation` | Stable evidence URI |
-| `provenance` | Source and extraction lineage |
-| `tombstone` | Deletion marker |
+```text
+entity
+relationship
+value
+valid_from / valid_to
+recorded_from / recorded_to
+document_id / version_id
+source_path
+citation
+provenance
+tombstone
+```
 
 Intervals are half-open:
 
@@ -222,175 +200,169 @@ valid_from <= query_time < valid_to
 recorded_from <= observation_time < recorded_to
 ```
 
-### 8.1 Bitemporal semantics
+- Valid time answers when a claim was effective in the business domain.
+- Recorded time answers when the system learned the claim.
+- Conflicting claims with the same valid start remain separate evidence.
+- Deletion creates a tombstone and current access fails closed.
 
-- Valid time answers when a claim was true or effective in the business domain.
-- Recorded time answers when the system observed the claim.
-- A policy modified in February but effective in April has a February
-  `recorded_from` and April `valid_from`.
-- A late event can have an old `valid_from` and a newer `recorded_from`.
-- Conflicting claims with the same valid-time start remain separate evidence
-  records instead of being silently reconciled.
-
-### 8.2 DynamoDB representation
-
-Temporal facts use:
+### 8.1 DynamoDB representation
 
 ```text
 pk = ENTITY#{entity}
 sk = REL#{relationship}#VALID#{valid_from}#REC#{recorded_from}#{record_id}
 ```
 
-A secondary index supports document and valid-time access:
+The current AWS adapter refreshes its small demo projection with a table scan
+before a query. Production should replace this with targeted `Query` operations
+and appropriate indexes.
+
+## 9. Authorization
+
+Central policy:
+
+> Historical evidence may be returned only when the caller currently has
+> access to the source document.
+
+For every candidate record, MCP calls `ContentSource.check_access` against the
+current source state before returning evidence. Exact-version retrieval and
+comparison use the same policy.
+
+### 9.1 Current authentication assumption
+
+Cognito currently provides workload authentication:
 
 ```text
-document_id + valid_from
+demo client --client credentials--> orchestrator
+orchestrator --client credentials--> MCP
 ```
 
-The source-state table stores event idempotency records and future durable
-cursor state.
+The demo principal travels through explicitly allow-listed AgentCore custom
+headers. This is not end-user authentication.
 
-### 8.3 Neptune representation
+### 9.2 Production identity path
 
-The graph projection contains:
+1. Validate an Entra ID user token at ingress.
+2. Derive immutable user and group object IDs from verified claims.
+3. Create `Principal` only from that verified identity.
+4. Pass a signed or platform-protected user context to MCP.
+5. Evaluate current SharePoint permissions through Microsoft Graph.
 
-- `Entity` vertices
-- `Document` vertices
-- `Version` vertices
-- `HAS_VERSION` edges
-- relationship edges carrying temporal and tombstone properties
+Caller-controlled principal headers must be rejected in production.
 
-Neptune is private and is not directly exposed to the model or clients.
+## 10. Deployment
 
-## 9. Authorization model
+`infra/core.yaml` provisions:
 
-The central policy is:
+- S3 artifact and immutable-version bucket
+- SQS change queue and DLQ
+- DynamoDB temporal-facts and source-state tables
+- AgentCore runtime role
+- Lambda ingestion role
+- Cognito resource server and machine client
 
-> Historical evidence may be returned only if the caller currently has access
-> to the source document.
+`infra/deploy.sh` then:
 
-Enforcement occurs in the MCP tools runtime:
+1. packages both runtime entry points and Lambda dependencies into one CodeZip
+2. uploads the immutable artifact to versioned S3
+3. creates or updates the Lambda ingestion worker and SQS mapping
+4. archives and seeds fixtures
+5. creates or updates the HTTP and MCP CodeZip runtimes
 
-1. Query candidate temporal records.
-2. Resolve each candidate’s source document.
-3. Call `ContentSource.check_access` against the current source version.
-4. Remove unauthorized evidence before returning structured results.
-5. Deny exact-version retrieval and version comparison when current access is
-   absent.
+Both AgentCore runtimes and Lambda share the same versioned S3 code artifact.
+The packaging step resolves binary dependencies for Linux ARM64/Python 3.13 and
+does not embed host-specific wheels.
 
-Runtime and Gateway ingress are protected with Cognito JWTs. Runtime-to-runtime
-MCP calls use OAuth client credentials and cached short-lived tokens.
+### 10.1 Migration from the container deployment
 
-Production identity must replace the demo identity mechanism with Entra ID
-subject and group IDs. Caller-supplied identity headers must not be trusted at
-an internet-facing boundary.
+Updating an existing stack removes the obsolete CodeBuild project and all ECR
+permissions from the runtime role. The former ECR repository had a retain
+policy, so CloudFormation can leave it behind as an unused resource. Delete it
+only after both AgentCore runtimes report a CodeZip `codeConfiguration` and the
+orchestrator-to-MCP path has been tested.
 
-## 10. Evidence and answer requirements
+## 11. Optional future Neptune path
 
-Every material answer should include:
-
-- entity
-- relationship
-- value or claim
-- valid interval
-- source artifact
-- source version
-- citation
-- conflict status when applicable
-
-The orchestrator system prompt instructs the model not to invent facts,
-citations, authorization decisions, dates, or graph queries. Tool results are
-the sole grounding source.
-
-The response includes:
-
-```json
-{
-  "answer": "natural-language response",
-  "evidence": [],
-  "tool_trace": [],
-  "model_id": "amazon.nova-lite-v1:0"
-}
-```
-
-## 11. Current search and vector retrieval
-
-Current source documents are archived under:
+Neptune is disabled by default and is not queried by the current application.
+Its future purpose is bounded multi-hop traversal across relationships such as:
 
 ```text
-s3://.../knowledge-base/current/
+application OWNED_BY team
+team REPORTS_TO organization
+application DEPENDS_ON system
+policy APPLIES_TO system
+supplier PROVIDES system
 ```
 
-The Bedrock Knowledge Base uses Titan Text Embeddings v2 with a 1024-dimensional
-S3 Vector index. This supports current-content semantic retrieval.
+Representative questions:
 
-Temporal truth remains in the bitemporal store. Vector retrieval is not used to
-infer historical validity intervals.
+- Which applications owned by teams under Finance depend on systems affected
+  by a policy on a given date?
+- Which downstream systems were exposed when a supplier's risk changed?
+- Through which evidence-backed path was an application connected to a deleted
+  procedure?
 
-## 12. Deployment
+The future MCP tool is proposed as:
 
-Core infrastructure is declared in `infra/core.yaml`. `infra/deploy.sh`:
+```text
+query_relationship_paths(
+  start_entity,
+  target_type,
+  relationship_types,
+  direction,
+  as_of,
+  max_hops,  # capped, initially 3
+  limit      # capped
+)
+```
 
-1. Deploys S3, SQS, DynamoDB, ECR, IAM, Cognito, and CodeBuild resources.
-2. Builds separate `tools` and `orchestrator` ARM64 images.
-3. Seeds S3, DynamoDB, and SQS with mock data.
-4. Creates S3 Vectors, Neptune Analytics, and the Knowledge Base.
-5. Creates the MCP tools runtime.
-6. Creates the HTTP orchestrator runtime referencing the tools runtime ARN.
+The service will compile these structured fields to parameterized OpenCypher,
+enforce relationship allow-lists and timeouts, and apply current-access checks
+to every evidence-bearing path segment. Raw Cypher will never cross the MCP
+boundary.
 
-Data-bearing resources use retention policies. Neptune deletion protection is
-enabled. Cleanup is intentionally explicit.
+DynamoDB and S3 remain authoritative. Neptune is disposable and rebuildable.
 
-## 13. Observability
+## 12. Deliberate removals
 
-Available signals:
+The holistic review removed components that had no current consumer:
 
-- AgentCore runtime status and CloudWatch runtime logs
-- Bedrock model and tool trace returned by the orchestrator
-- CodeBuild logs for image builds
-- Lambda logs and SQS queue depth for ingestion
-- DynamoDB source-state count for idempotency
-- Knowledge Base ingestion-job statistics
-- Neptune import-task status
+- the duplicate orchestrator and generic Dockerfiles
+- the remaining MCP Dockerfile, ECR repository and CodeBuild project after
+  selecting AgentCore CodeZip for both runtimes
+- Bedrock Knowledge Base and S3 Vectors
+- AgentCore Gateway claims and the unused Gateway Lambda handler
+- the hidden `ask_temporal` pseudo-tool
+- Neptune seeding scripts that projected no useful multi-hop ontology
 
-Production additions should include:
+These can return only when backed by a concrete tool and tested request path.
 
-- structured correlation IDs across both runtimes
-- model latency and token metrics
-- per-tool latency/error/access-filter counts
-- ingestion lag and delta-cursor age
-- denied historical evidence metrics without document details
-- alarms for DLQ depth and failed Knowledge Base ingestion
-
-## 14. Failure handling
+## 13. Failure behavior
 
 | Failure | Behavior |
 |---|---|
-| Duplicate change event | Source-state conditional write makes it idempotent |
-| Out-of-order event | Temporal materializer repairs valid-time ordering |
-| Deleted source | Tombstone retained; current access fails closed |
+| Duplicate source event | Source-state conditional write skips it |
+| Out-of-order local event | Materializer repairs valid-time ordering |
+| Deleted source | Tombstone retained; access fails closed |
 | Permission removed | Historical evidence is filtered immediately |
+| MCP unavailable | Orchestrator fails rather than bypassing tools |
 | Bedrock tool error | Error is returned to the model as a failed tool result |
-| Model exceeds tool turns | Orchestrator fails after six turns |
-| MCP unavailable | Orchestrator returns a tool failure rather than bypassing MCP |
-| Knowledge Base unavailable | Temporal graph tools remain authoritative |
-| Neptune unavailable | DynamoDB temporal query path remains available |
+| Optional Neptune unavailable | Current direct temporal questions are unaffected |
 
-## 15. Testing
+## 14. Tests
 
-The test suite covers:
+The suite covers:
 
-- as-of ownership
-- changes between dates
-- evidence lineage
+- as-of queries and changes between dates
+- policy effective date versus modification date
+- lineage and citations
 - current-access enforcement
-- late and out-of-order ingestion
-- deletion and tombstones
+- late and out-of-order events
 - conflicting claims
+- deletion and tombstones
 - exact-version comparison
 - MCP allow-list enforcement
-- natural-language fallback
-- Bedrock tool-selection loop
+- natural-language orchestration
+- Bedrock tool selection
 
 Run:
 
@@ -398,70 +370,31 @@ Run:
 python3 -m unittest discover -v
 ```
 
-AWS smoke test:
-
-```bash
-python3 scripts/ask_aws.py "Who owned Atlas on 2024-02-01?"
-```
-
-## 16. Known limitations
-
-1. **SharePoint is mocked.** No Graph delta tokens, webhooks, DriveItem version
-   downloads, or Entra ID authorization are implemented.
-2. **Demo identity propagation is not production-grade.** The local HTTP server
-   defaults to `alice`, and runtime-to-runtime principal forwarding currently
-   uses headers. Production must derive identity from verified JWT claims and
-   pass a signed or platform-provided identity context.
-3. **Incremental interval repair is incomplete in Lambda.** The deployed Lambda
-   worker performs idempotent insert-only fact writes. The authoritative fixture
-   replay/materializer repairs valid-time intervals, but production ingestion
-   needs transactional interval closing and recorded-time correction logic.
-4. **Recorded-time querying is modeled but not exposed as a public tool
-   parameter.** The current tool supports valid-time and changed-between queries.
-5. **The Gateway Lambda target is auxiliary.** The primary supported query path
-   is HTTP orchestrator to MCP tools runtime.
-6. **Extraction is fixture-provided.** Production requires a versioned claim
-   extraction pipeline and provenance for extraction model/prompt versions.
-7. **No multi-tenant isolation model is implemented.**
-
-## 17. Production completion plan
+## 15. Production completion path
 
 ### Phase 1: Microsoft identity and source
 
-- Validate Entra ID JWTs.
-- Map immutable user and group object IDs to `Principal`.
-- Implement Graph delta cursor persistence and webhook renewal.
-- Implement exact DriveItem version retrieval and immutable S3 archival.
-- Evaluate current SharePoint permissions through Graph.
+- implement `MicrosoftGraphContentSource`
+- validate Entra JWTs and group claims
+- persist Graph delta cursors and subscriptions
+- retrieve exact DriveItem versions and current permissions
 
 ### Phase 2: durable temporal ingestion
 
-- Move interval repair into a transactional DynamoDB materializer.
-- Close superseded `valid_to` and `recorded_to` intervals.
-- Add replay checkpoints, poison-event handling, and reprocessing controls.
-- Rebuild Neptune projection from the authoritative DynamoDB/S3 history.
+- transactionally repair valid and recorded intervals
+- add replay checkpoints and poison-event controls
+- replace table scans with targeted DynamoDB queries
 
-### Phase 3: operational hardening
+### Phase 3: optional multi-hop graph queries
 
-- Separate IAM roles for orchestrator, MCP tools, ingestion, Gateway, and build.
-- Use private networking or controlled egress where supported.
-- Add distributed tracing, alarms, budgets, and retention policies.
-- Add load, adversarial authorization, and model-evaluation suites.
-- Add blue/green AgentCore runtime versions and rollback automation.
+- define and version the relationship ontology
+- build a rebuildable Neptune projection
+- implement bounded `query_relationship_paths`
+- test authorization, cycles, deleted evidence and projection lag
 
-## 18. Key source files
+### Phase 4: operations
 
-| Area | File |
-|---|---|
-| Bedrock orchestrator | `temporal_agent/bedrock_agent.py` |
-| Runtime-to-runtime MCP client | `temporal_agent/remote_mcp.py` |
-| Structured tools and policy | `temporal_agent/tools.py` |
-| MCP JSON-RPC service | `temporal_agent/mcp.py` |
-| Runtime HTTP server | `temporal_agent/server.py` |
-| Content-source boundary | `temporal_agent/source.py` |
-| Bitemporal model | `temporal_agent/models.py` |
-| Temporal materializer | `temporal_agent/store.py` |
-| AWS-backed projection | `temporal_agent/aws_backend.py` |
-| Lambda handlers | `aws_lambda/handlers.py` |
-| Infrastructure | `infra/core.yaml`, `infra/deploy.sh` |
-| Fixtures | `fixtures/repository.json`, `fixtures/changes.jsonl` |
+- split runtime roles by responsibility if required
+- add tracing, ingestion-lag alarms and token metrics
+- add load and adversarial authorization suites
+- add deployment rollback automation

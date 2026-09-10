@@ -1,6 +1,0 @@
-.git
-__pycache__
-*.pyc
-tests
-infra
-aws_lambda

@@ -24,10 +24,7 @@ class RemoteMCPTools:
         self._expires_at = 0.0
 
     def schemas(self):
-        return [
-            schema for schema in SharePointTools.schemas()
-            if schema["name"] != "ask_temporal"
-        ]
+        return SharePointTools.schemas()
 
     def call(self, name: str, arguments: dict, principal: Principal) -> dict:
         allowed = {schema["name"] for schema in self.schemas()}
@@ -52,8 +49,9 @@ class RemoteMCPTools:
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
                 "MCP-Protocol-Version": "2025-06-18",
-                "X-Principal-Id": principal.id,
-                "X-Principal-Groups": ",".join(sorted(principal.groups)),
+                "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Principal-Id": principal.id,
+                "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Principal-Groups":
+                    ",".join(sorted(principal.groups)),
             },
         ), timeout=60)
         payload = json.load(response)
@@ -88,4 +86,3 @@ class RemoteMCPTools:
         self._token = token["access_token"]
         self._expires_at = time.time() + int(token.get("expires_in", 3600))
         return self._token
-

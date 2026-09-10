@@ -12,7 +12,7 @@ import boto3
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime-arn")
-    parser.add_argument("--endpoint", help="Direct AgentCore Gateway MCP URL")
+    parser.add_argument("--endpoint", help="Direct AgentCore invocation URL")
     parser.add_argument("--user-pool-id", required=True)
     parser.add_argument("--client-id", required=True)
     parser.add_argument("--token-url", required=True)
@@ -59,7 +59,7 @@ def main():
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
-        "X-Principal-Id": args.principal,
+        "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Principal-Id": args.principal,
     }
     if args.protocol == "mcp":
         headers["MCP-Protocol-Version"] = "2025-06-18"

@@ -1,22 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
 
 MAX_TIME = "9999-12-31T23:59:59Z"
-
-
-def instant(value: str | datetime) -> str:
-    if isinstance(value, datetime):
-        value = value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    if value.endswith("Z"):
-        return value
-    parsed = datetime.fromisoformat(value)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass(frozen=True)
@@ -79,4 +67,3 @@ class TemporalRecord:
             "provenance": self.provenance,
             "tombstone": self.tombstone,
         }
-

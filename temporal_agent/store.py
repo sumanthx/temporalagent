@@ -6,11 +6,14 @@ from .models import MAX_TIME, SourceVersion, TemporalRecord
 
 
 class TemporalGraphStore:
-    """Append-oriented local substitute for DynamoDB/Neptune temporal projections."""
+    """Append-oriented local substitute for the DynamoDB temporal fact store."""
 
     def __init__(self):
         self.records: list[TemporalRecord] = []
         self.ingested_events: set[str] = set()
+
+    def refresh(self) -> None:
+        """Refresh an external projection; local fixture stores are already current."""
 
     def ingest(self, version: SourceVersion, recorded_at: str, event_id: str) -> None:
         if event_id in self.ingested_events:
@@ -75,6 +78,7 @@ class TemporalGraphStore:
 
     def query(self, *, entity=None, relationship=None, valid_at=None,
               changed_from=None, changed_to=None) -> list[TemporalRecord]:
+        self.refresh()
         rows = self.records
         if entity:
             rows = [r for r in rows if r.entity.lower() == entity.lower()]
@@ -87,4 +91,3 @@ class TemporalGraphStore:
         if changed_to:
             rows = [r for r in rows if r.valid_from < changed_to]
         return sorted(rows, key=lambda r: (r.valid_from, r.recorded_from, r.record_id))
-

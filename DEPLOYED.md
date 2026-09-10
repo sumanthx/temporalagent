@@ -1,67 +1,70 @@
 # Deployment inventory
 
-Physical AWS account IDs, ARNs, runtime IDs, bucket names, user-pool IDs, and
-client IDs are deliberately not committed. Discover them from the deployed
-stack and control planes when needed.
+Physical AWS identifiers are intentionally excluded from source control.
 
 Stable logical names:
 
 - CloudFormation stack: `sharepoint-temporal-agent-core`
 - Project tag: `sharepoint-temporal-agent`
-- AgentCore HTTP runtime name: `sharepoint_temporal_orchestrator`
-- AgentCore MCP runtime name: `sharepoint_temporal_tools`
-- Knowledge Base name: `sharepoint-temporal-agent`
-- Neptune graph name: `sharepoint-temporal-agent`
-- Gateway name: `sharepoint-temporal-gateway`
-- Lambda function prefix: `sharepoint-temporal-agent-`
+- HTTP runtime: `sharepoint_temporal_orchestrator`
+- MCP runtime: `sharepoint_temporal_tools`
+- Ingestion function: `sharepoint-temporal-agent-ingestion`
+- Optional Neptune graph: `sharepoint-temporal-agent`
 
-The stack also creates the evidence bucket, DynamoDB temporal and source-state
-tables, SQS queue and DLQ, ECR repository, CodeBuild project, IAM roles, and
-Cognito user pool/client.
+The stack owns S3, SQS/DLQ, DynamoDB, IAM and Cognito resources. The deployment
+script creates or updates the Lambda worker and two AgentCore CodeZip runtimes.
 
-## Discover physical identifiers
+## Discover identifiers
 
 ```bash
-AWS_PROFILE=default AWS_REGION=<region> \
+AWS_PROFILE=<profile> AWS_REGION=<region> \
 aws cloudformation describe-stacks \
   --stack-name sharepoint-temporal-agent-core \
   --query 'Stacks[0].Outputs'
 ```
 
 ```bash
-AWS_PROFILE=default AWS_REGION=<region> \
+AWS_PROFILE=<profile> AWS_REGION=<region> \
 aws bedrock-agentcore-control list-agent-runtimes \
   --query 'agentRuntimes[?contains(agentRuntimeName, `sharepoint_temporal`)]'
 ```
 
-The natural-language demo performs this discovery automatically:
+## Invoke
 
 ```bash
 python3 scripts/ask_aws.py \
+  --profile <profile> \
   --region <region> \
   "Who owned Atlas on 2024-02-01?"
 ```
 
-The client secret is intentionally not stored in this repository. The helper
-reads it through the AWS API and only keeps it in memory while obtaining a
-short-lived token.
+The client secret is read through the Cognito API and held only in memory while
+obtaining a short-lived client-credentials token.
 
-## Security behavior
+## Security assumptions
 
-- Both runtimes and Gateway require Cognito JWTs.
-- The orchestrator calls tools only through the separate MCP runtime.
-- The MCP runtime filters historical evidence by the mock source's current ACL.
-- Gateway historical queries fail closed unless a verified caller subject is
-  propagated to the Lambda request context.
-- Neptune has no public connectivity.
-- S3 public access is blocked; S3 and SQS use server-side encryption.
-- DynamoDB point-in-time recovery is enabled.
+- Both AgentCore runtimes require Cognito JWTs.
+- The orchestrator calls tools only through the MCP runtime.
+- Historical evidence is filtered using the mock source's current ACL.
+- The forwarded demo principal is not production user authentication.
+- Production must derive user and group IDs from a verified Entra ID token.
+- S3 public access is blocked and DynamoDB point-in-time recovery is enabled.
 
-## Costs and cleanup
+## Optional Neptune
 
-AgentCore, Neptune Analytics, Bedrock embedding/Knowledge Base ingestion,
-CodeBuild, S3 Vectors, Lambda, DynamoDB, SQS, S3, ECR, Cognito, and CloudWatch
-may incur charges. Neptune Analytics is provisioned at 16 m-NCU and has deletion
-protection enabled. Data-bearing resources use retention policies. Review
-`infra/destroy.sh` and delete managed resources explicitly when the demo is no
-longer needed.
+Neptune is disabled by default:
+
+```bash
+ENABLE_NEPTUNE=true AWS_PROFILE=<profile> AWS_REGION=<region> \
+  bash infra/deploy.sh
+```
+
+The current app does not query it. Enabling it only provisions a graph for the
+future bounded multi-hop phase.
+
+## Cleanup
+
+S3 and DynamoDB use retention policies. The AgentCore runtimes, Lambda function,
+and optional Neptune graph are managed outside the stack and require explicit
+cleanup. Previously deployed ECR, CodeBuild, Knowledge Base or S3 Vector
+resources are no longer used and may remain until explicitly removed.

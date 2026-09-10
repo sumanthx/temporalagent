@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: SharePoint temporal agent durable AWS core
+Description: SharePoint temporal agent AWS core
 Parameters:
   ProjectName: {Type: String, Default: sharepoint-temporal-agent}
   ArtifactBucketName: {Type: String}
@@ -20,12 +20,14 @@ Resources:
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
       Tags: [{Key: Project, Value: !Ref ProjectName}]
+
   DeadLetterQueue:
     Type: AWS::SQS::Queue
     Properties:
       MessageRetentionPeriod: 1209600
       SqsManagedSseEnabled: true
       Tags: [{Key: Project, Value: !Ref ProjectName}]
+
   ChangeQueue:
     Type: AWS::SQS::Queue
     Properties:
@@ -36,6 +38,7 @@ Resources:
         deadLetterTargetArn: !GetAtt DeadLetterQueue.Arn
         maxReceiveCount: 5
       Tags: [{Key: Project, Value: !Ref ProjectName}]
+
   TemporalFactsTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -59,6 +62,7 @@ Resources:
       PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
       SSESpecification: {SSEEnabled: true}
       Tags: [{Key: Project, Value: !Ref ProjectName}]
+
   SourceStateTable:
     Type: AWS::DynamoDB::Table
     DeletionPolicy: Retain
@@ -70,14 +74,7 @@ Resources:
       PointInTimeRecoverySpecification: {PointInTimeRecoveryEnabled: true}
       SSESpecification: {SSEEnabled: true}
       Tags: [{Key: Project, Value: !Ref ProjectName}]
-  RuntimeRepository:
-    Type: AWS::ECR::Repository
-    DeletionPolicy: Retain
-    UpdateReplacePolicy: Retain
-    Properties:
-      ImageScanningConfiguration: {ScanOnPush: true}
-      ImageTagMutability: MUTABLE
-      Tags: [{Key: Project, Value: !Ref ProjectName}]
+
   RuntimeRole:
     Type: AWS::IAM::Role
     Properties:
@@ -85,7 +82,7 @@ Resources:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal: {Service: [bedrock-agentcore.amazonaws.com, lambda.amazonaws.com]}
+            Principal: {Service: bedrock-agentcore.amazonaws.com}
             Action: sts:AssumeRole
       Policies:
         - PolicyName: TemporalAgentRuntime
@@ -93,153 +90,64 @@ Resources:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query, dynamodb:Scan, dynamodb:BatchWriteItem]
-                Resource: [!GetAtt TemporalFactsTable.Arn, !Sub '${TemporalFactsTable.Arn}/index/*', !GetAtt SourceStateTable.Arn]
+                Action: [dynamodb:GetItem, dynamodb:Query, dynamodb:Scan]
+                Resource:
+                  - !GetAtt TemporalFactsTable.Arn
+                  - !Sub '${TemporalFactsTable.Arn}/index/*'
               - Effect: Allow
-                Action: [s3:GetObject, s3:PutObject, s3:ListBucket]
-                Resource: [!GetAtt ArtifactBucket.Arn, !Sub '${ArtifactBucket.Arn}/*']
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:ListBucket]
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub '${ArtifactBucket.Arn}/*'
               - Effect: Allow
-                Action: [sqs:SendMessage, sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
-                Resource: !GetAtt ChangeQueue.Arn
-              - Effect: Allow
-                Action: [bedrock:InvokeModel, bedrock:Retrieve, bedrock:RetrieveAndGenerate]
-                Resource: '*'
+                Action: bedrock:InvokeModel
+                Resource: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.nova-lite-v1:0'
               - Effect: Allow
                 Action: cognito-idp:DescribeUserPoolClient
                 Resource: !GetAtt AgentUserPool.Arn
               - Effect: Allow
-                Action: [neptune-graph:ReadDataViaQuery, neptune-graph:WriteDataViaQuery, neptune-graph:DeleteDataViaQuery]
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
                 Resource: '*'
-              - Effect: Allow
-                Action: [s3vectors:GetVectors, s3vectors:PutVectors, s3vectors:QueryVectors]
-                Resource: '*'
-              - Effect: Allow
-                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents, ecr:GetAuthorizationToken]
-                Resource: '*'
-              - Effect: Allow
-                Action: lambda:InvokeFunction
-                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-*'
-              - Effect: Allow
-                Action: [ecr:BatchGetImage, ecr:GetDownloadUrlForLayer, ecr:BatchCheckLayerAvailability]
-                Resource: !GetAtt RuntimeRepository.Arn
-  KnowledgeBaseRole:
+
+  IngestionRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
         Version: '2012-10-17'
         Statement:
           - Effect: Allow
-            Principal: {Service: bedrock.amazonaws.com}
+            Principal: {Service: lambda.amazonaws.com}
             Action: sts:AssumeRole
-            Condition: {StringEquals: {'aws:SourceAccount': !Ref 'AWS::AccountId'}}
       Policies:
-        - PolicyName: KnowledgeBaseAccess
+        - PolicyName: TemporalIngestion
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
               - Effect: Allow
-                Action: bedrock:InvokeModel
-                Resource: !Sub 'arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/amazon.titan-embed-text-v2:0'
+                Action: [dynamodb:GetItem, dynamodb:PutItem, dynamodb:UpdateItem, dynamodb:Query]
+                Resource:
+                  - !GetAtt TemporalFactsTable.Arn
+                  - !GetAtt SourceStateTable.Arn
               - Effect: Allow
-                Action: [s3:GetObject, s3:ListBucket]
-                Resource: [!GetAtt ArtifactBucket.Arn, !Sub '${ArtifactBucket.Arn}/*']
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:ListBucket]
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub '${ArtifactBucket.Arn}/*'
               - Effect: Allow
-                Action: [s3vectors:GetVectors, s3vectors:PutVectors, s3vectors:QueryVectors]
-                Resource: '*'
-  CodeBuildRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: {Service: codebuild.amazonaws.com}
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: RuntimeImageBuild
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: [s3:GetObject, s3:GetObjectVersion]
-                Resource: !Sub '${ArtifactBucket.Arn}/build/*'
-              - Effect: Allow
-                Action: [ecr:GetAuthorizationToken]
-                Resource: '*'
-              - Effect: Allow
-                Action: [ecr:BatchCheckLayerAvailability, ecr:GetDownloadUrlForLayer, ecr:BatchGetImage, ecr:InitiateLayerUpload, ecr:UploadLayerPart, ecr:CompleteLayerUpload, ecr:PutImage]
-                Resource: !GetAtt RuntimeRepository.Arn
+                Action: [sqs:ReceiveMessage, sqs:DeleteMessage, sqs:GetQueueAttributes]
+                Resource: !GetAtt ChangeQueue.Arn
               - Effect: Allow
                 Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
                 Resource: '*'
-  RuntimeBuild:
-    Type: AWS::CodeBuild::Project
-    Properties:
-      Name: !Sub '${ProjectName}-runtime'
-      ServiceRole: !GetAtt CodeBuildRole.Arn
-      Artifacts: {Type: NO_ARTIFACTS}
-      Source:
-        Type: S3
-        Location: !Sub '${ArtifactBucket}/build/runtime.zip'
-        BuildSpec: |
-          version: 0.2
-          phases:
-            pre_build:
-              commands:
-                - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $REPOSITORY_HOST
-            build:
-              commands:
-                - docker build -f $DOCKERFILE -t $REPOSITORY_URI:$IMAGE_TAG .
-            post_build:
-              commands:
-                - docker push $REPOSITORY_URI:$IMAGE_TAG
-      Environment:
-        Type: ARM_CONTAINER
-        ComputeType: BUILD_GENERAL1_SMALL
-        Image: aws/codebuild/amazonlinux-aarch64-standard:3.0
-        PrivilegedMode: true
-        EnvironmentVariables:
-          - Name: REPOSITORY_URI
-            Value: !GetAtt RuntimeRepository.RepositoryUri
-          - Name: REPOSITORY_HOST
-            Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.${AWS::URLSuffix}'
-          - Name: DOCKERFILE
-            Value: Dockerfile.tools
-          - Name: IMAGE_TAG
-            Value: tools
-      TimeoutInMinutes: 20
-      Tags: [{Key: Project, Value: !Ref ProjectName}]
-  NeptuneImportRole:
-    Type: AWS::IAM::Role
-    Properties:
-      AssumeRolePolicyDocument:
-        Version: '2012-10-17'
-        Statement:
-          - Effect: Allow
-            Principal: {Service: neptune-graph.amazonaws.com}
-            Action: sts:AssumeRole
-      Policies:
-        - PolicyName: ReadGraphImport
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action: [s3:GetObject, s3:ListBucket]
-                Resource: [!GetAtt ArtifactBucket.Arn, !Sub '${ArtifactBucket.Arn}/neptune-import/*']
+
   AgentUserPool:
     Type: AWS::Cognito::UserPool
     Properties:
       UserPoolName: !Sub '${ProjectName}-users'
       DeletionProtection: ACTIVE
       AdminCreateUserConfig: {AllowAdminCreateUserOnly: true}
-      Policies:
-        PasswordPolicy:
-          MinimumLength: 14
-          RequireLowercase: true
-          RequireNumbers: true
-          RequireSymbols: true
-          RequireUppercase: true
       UserPoolTags: {Project: !Ref ProjectName}
+
   AgentUserPoolResourceServer:
     Type: AWS::Cognito::UserPoolResourceServer
     Properties:
@@ -249,6 +157,7 @@ Resources:
       Scopes:
         - ScopeName: invoke
           ScopeDescription: Invoke the temporal agent
+
   AgentMachineClient:
     Type: AWS::Cognito::UserPoolClient
     DependsOn: AgentUserPoolResourceServer
@@ -261,22 +170,21 @@ Resources:
       AllowedOAuthScopes: [temporal-agent/invoke]
       AccessTokenValidity: 60
       TokenValidityUnits: {AccessToken: minutes}
+
   AgentUserPoolDomain:
     Type: AWS::Cognito::UserPoolDomain
     Properties:
       Domain: !Sub '${ProjectName}-${AWS::AccountId}'
       UserPoolId: !Ref AgentUserPool
+
 Outputs:
   ArtifactBucket: {Value: !Ref ArtifactBucket}
   ChangeQueueUrl: {Value: !Ref ChangeQueue}
   ChangeQueueArn: {Value: !GetAtt ChangeQueue.Arn}
   TemporalFactsTable: {Value: !Ref TemporalFactsTable}
   SourceStateTable: {Value: !Ref SourceStateTable}
-  RuntimeRepositoryUri: {Value: !GetAtt RuntimeRepository.RepositoryUri}
   RuntimeRoleArn: {Value: !GetAtt RuntimeRole.Arn}
-  KnowledgeBaseRoleArn: {Value: !GetAtt KnowledgeBaseRole.Arn}
-  RuntimeBuildProject: {Value: !Ref RuntimeBuild}
-  NeptuneImportRoleArn: {Value: !GetAtt NeptuneImportRole.Arn}
+  IngestionRoleArn: {Value: !GetAtt IngestionRole.Arn}
   AgentUserPoolId: {Value: !Ref AgentUserPool}
   AgentMachineClientId: {Value: !Ref AgentMachineClient}
   AgentIssuerUrl:

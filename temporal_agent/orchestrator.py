@@ -14,9 +14,6 @@ class AgentOrchestrator:
         self.tools = tools
 
     def invoke(self, payload: dict, principal: Principal) -> dict:
-        if "tool" in payload:
-            result = self.tools.call(payload["tool"], payload.get("arguments", {}), principal)
-            return {"answer": self._render(result), "tool_result": result}
         prompt = payload.get("prompt", "")
         if os.environ.get("BEDROCK_AGENT_MODEL_ID"):
             from .bedrock_agent import BedrockTemporalAgent
@@ -38,7 +35,11 @@ class AgentOrchestrator:
 
     @staticmethod
     def _entity(prompt):
-        match = re.search(r"(?:owner of|owns|about)\s+([A-Z][\w -]+?)(?:\s+(?:as of|between)|[?.]|$)", prompt)
+        match = re.search(
+            r"(?:owner of|owned|owns|about)\s+([A-Z][\w -]+?)"
+            r"(?:\s+(?:as of|on|between)|[?.]|$)",
+            prompt,
+        )
         return match.group(1).strip() if match else None
 
     @staticmethod
@@ -46,6 +47,8 @@ class AgentOrchestrator:
         lowered = prompt.lower()
         mappings = {
             "owner": "owner",
+            "owned": "owner",
+            "ownership": "owner",
             "retention": "retention_period",
             "risk": "risk",
             "exception": "exception_status",

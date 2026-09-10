@@ -6,6 +6,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .models import Principal
 
 
+def principal_from_headers(headers) -> Principal:
+    return Principal(
+        headers.get(
+            "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Principal-Id",
+            "alice",
+        ),
+        frozenset(filter(None, headers.get(
+            "X-Amzn-Bedrock-AgentCore-Runtime-Custom-Principal-Groups",
+            "",
+        ).split(","))),
+    )
+
+
 def handler_for(app):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -17,10 +30,7 @@ def handler_for(app):
         def do_POST(self):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
-            principal = Principal(
-                self.headers.get("X-Principal-Id", "alice"),
-                frozenset(filter(None, self.headers.get("X-Principal-Groups", "").split(","))),
-            )
+            principal = principal_from_headers(self.headers)
             if self.path == "/invocations":
                 self._send(200, app.orchestrator.invoke(body, principal))
             elif self.path == "/mcp":
@@ -43,4 +53,3 @@ def handler_for(app):
 
 def serve(app, host="0.0.0.0", port=8080):
     ThreadingHTTPServer((host, port), handler_for(app)).serve_forever()
-

@@ -11,8 +11,8 @@ if TYPE_CHECKING:
 
 
 SYSTEM_PROMPT = """You are a SharePoint temporal-query agent.
-Today is 2026-09-10. Answer by selecting only from the provided allow-listed
-tools. Never invent facts, citations, access decisions, dates, or graph queries.
+Answer by selecting only from the provided allow-listed tools. Never invent
+facts, citations, access decisions, dates, or graph queries.
 Use query_temporal_graph for historical, as-of, and change questions; use
 search_sharepoint_current for current content; use exact-version tools for source
 detail. Dates sent to temporal tools must be ISO-8601 UTC timestamps.
@@ -117,5 +117,4 @@ class BedrockTemporalAgent:
                 "inputSchema": {"json": schema["inputSchema"]},
             }}
             for schema in self.tools.schemas()
-            if schema["name"] != "ask_temporal"
         ]

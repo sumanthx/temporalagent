@@ -17,14 +17,9 @@ class MCPService:
                           "capabilities": {"tools": {}},
                           "serverInfo": {"name": "mock-sharepoint", "version": "0.1.0"}}
             elif method == "tools/list":
-                result = {"tools": [
-                    schema for schema in self.tools.schemas()
-                    if schema["name"] != "ask_temporal"
-                ]}
+                result = {"tools": self.tools.schemas()}
             elif method == "tools/call":
                 params = request["params"]
-                if params["name"] == "ask_temporal":
-                    raise ValueError("orchestration is not exposed by the tools runtime")
                 value = self.tools.call(params["name"], params.get("arguments", {}), principal)
                 result = {"content": [{"type": "text", "text": __import__("json").dumps(value)}],
                           "structuredContent": value}

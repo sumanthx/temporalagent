@@ -5,6 +5,31 @@ import boto3
 
 ddb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
+MAX_TIME = "9999-12-31T23:59:59Z"
+
+
+def _repair_valid_intervals(table, entity, relationship, document_id):
+    response = table.query(
+        KeyConditionExpression=boto3.dynamodb.conditions.Key("pk").eq(
+            f"ENTITY#{entity}"),
+        ConsistentRead=True,
+    )
+    rows = [
+        row for row in response.get("Items", [])
+        if row["relationship"] == relationship
+        and row["document_id"] == document_id
+        and not row.get("tombstone", False)
+    ]
+    starts = sorted({row["valid_from"] for row in rows})
+    for row in rows:
+        later = [start for start in starts if start > row["valid_from"]]
+        valid_to = min(later, default=MAX_TIME)
+        if row["valid_to"] != valid_to:
+            table.update_item(
+                Key={"pk": row["pk"], "sk": row["sk"]},
+                UpdateExpression="SET valid_to = :valid_to",
+                ExpressionAttributeValues={":valid_to": valid_to},
+            )
 
 
 def ingest(event, _context):
@@ -15,16 +40,19 @@ def ingest(event, _context):
     for message in event.get("Records", []):
         change = json.loads(message["body"])
         event_id = change["event_id"]
-        try:
-            state.put_item(
-                Item={"pk": f"EVENT#{event_id}", "change": change},
-                ConditionExpression="attribute_not_exists(pk)",
-            )
-        except ddb.meta.client.exceptions.ConditionalCheckFailedException:
+        event_key = {"pk": f"EVENT#{event_id}"}
+        if state.get_item(Key=event_key, ConsistentRead=True).get("Item"):
             continue
         key = f"versions/{change['document_id']}/{change['version_id']}.json"
         version = json.loads(s3.get_object(Bucket=bucket, Key=key)["Body"].read())
-        for claim in version.get("claims", []):
+        claims = list(version.get("claims", []))
+        if version.get("deleted"):
+            claims.append({
+                "entity": version["document_id"],
+                "relationship": "status",
+                "value": "deleted",
+            })
+        for claim in claims:
             raw = ":".join([
                 version["document_id"], version["version_id"], claim["entity"],
                 claim["relationship"], str(claim["value"]),
@@ -42,12 +70,15 @@ def ingest(event, _context):
                 "relationship": claim["relationship"],
                 "value": str(claim["value"]),
                 "valid_from": valid_from,
-                "valid_to": "9999-12-31T23:59:59Z",
+                "valid_to": MAX_TIME,
                 "recorded_from": change["recorded_at"],
-                "recorded_to": "9999-12-31T23:59:59Z",
+                "recorded_to": MAX_TIME,
                 "source_path": version["path"],
                 "citation": f"sharepoint://{version['document_id']}/versions/{version['version_id']}",
-                "provenance": version.get("provenance", {}),
+                "provenance": {
+                    **version.get("provenance", {}),
+                    "modified_at": version["modified_at"],
+                },
                 "tombstone": bool(version.get("deleted", False)),
             }
             try:
@@ -57,60 +88,18 @@ def ingest(event, _context):
                 )
             except ddb.meta.client.exceptions.ConditionalCheckFailedException:
                 pass
+            _repair_valid_intervals(
+                facts,
+                claim["entity"],
+                claim["relationship"],
+                version["document_id"],
+            )
+        try:
+            state.put_item(
+                Item={**event_key, "change": change},
+                ConditionExpression="attribute_not_exists(pk)",
+            )
+        except ddb.meta.client.exceptions.ConditionalCheckFailedException:
+            pass
         processed += 1
     return {"processed": processed}
-
-
-def gateway(event, _context):
-    args = (event.get("arguments") or event.get("input")
-            or event.get("parameters") or event)
-    if isinstance(args, str):
-        args = json.loads(args)
-    if isinstance(args, list):
-        args = {row["name"]: row.get("value") for row in args}
-    if not args and event.get("requestBody"):
-        content = event["requestBody"].get("content", {})
-        media = content.get("application/json") or next(iter(content.values()), {})
-        properties = media.get("properties", [])
-        args = {row["name"]: row.get("value") for row in properties}
-    entity = args.get("entity")
-    relationship = args.get("relationship")
-    as_of = args.get("as_of")
-    table = ddb.Table(os.environ["TEMPORAL_FACTS_TABLE"])
-    response = table.query(
-        KeyConditionExpression=boto3.dynamodb.conditions.Key("pk").eq(f"ENTITY#{entity}")
-    )
-    rows = response.get("Items", [])
-    if relationship:
-        rows = [r for r in rows if r["relationship"] == relationship]
-    if as_of:
-        rows = [r for r in rows if r["valid_from"] <= as_of < r["valid_to"]]
-    context = event.get("requestContext", {})
-    claims = context.get("authorizer", {}).get("claims", {})
-    principal = claims.get("sub")
-    if not principal:
-        return {"evidence": [], "access_denied": True,
-                "reason": "verified caller identity required"}
-    repository = json.loads(s3.get_object(
-        Bucket=os.environ["ARTIFACT_BUCKET"],
-        Key="mock-source/repository.json")["Body"].read())
-    current = {}
-    for version in repository["versions"]:
-        prior = current.get(version["document_id"])
-        if prior is None or (version["valid_from"], version["version_id"]) > (
-                prior["valid_from"], prior["version_id"]):
-            current[version["document_id"]] = version
-    rows = [
-        r for r in rows
-        if not current.get(r["document_id"], {}).get("deleted", False)
-        and principal in current.get(r["document_id"], {}).get("readers", [])
-    ]
-    return {
-        "evidence": [{
-            "entity": r["entity"], "relationship": r["relationship"], "value": r["value"],
-            "validity": {"from": r["valid_from"], "to": r["valid_to"]},
-            "source": {"artifact": r["source_path"], "document_id": r["document_id"],
-                       "version_id": r["version_id"]},
-            "citation": r["citation"],
-        } for r in rows]
-    }

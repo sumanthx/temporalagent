@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import re
 from difflib import unified_diff
 
 from .models import Principal
@@ -13,7 +11,6 @@ class SharePointTools:
     """Allow-listed structured tools. No arbitrary graph query surface exists."""
 
     NAMES = (
-        "ask_temporal",
         "search_sharepoint_current", "resolve_entity", "query_temporal_graph",
         "retrieve_version_evidence", "compare_document_versions", "check_access",
     )
@@ -33,62 +30,8 @@ class SharePointTools:
             for v in self.source.search_current(query, principal)
         ]}
 
-    def ask_temporal(self, question: str, principal: Principal):
-        """Use Bedrock in AWS mode and a deterministic planner in local mode."""
-        if os.environ.get("BEDROCK_AGENT_MODEL_ID"):
-            from .bedrock_agent import BedrockTemporalAgent
-            return BedrockTemporalAgent(self).ask(question, principal)
-        return self._ask_temporal_local(question, principal)
-
-    def _ask_temporal_local(self, question: str, principal: Principal):
-        """Credential-free fallback for local tests and development."""
-        entity_match = re.search(
-            r"(?:owner of|owned|owns|about)\s+([A-Z][\w -]+?)"
-            r"(?:\s+(?:as of|on|between)|[?.]|$)",
-            question,
-        )
-        entity = entity_match.group(1).strip() if entity_match else None
-        lowered = question.lower()
-        relationship = next((
-            value for token, value in {
-                "owner": "owner",
-                "owned": "owner",
-                "retention": "retention_period",
-                "risk": "risk",
-                "exception": "exception_status",
-            }.items() if token in lowered
-        ), None)
-        dates = re.findall(r"\d{4}-\d{2}-\d{2}", question)
-        if "between" in lowered and len(dates) >= 2:
-            result = self.query_temporal_graph(
-                principal=principal, entity=entity, relationship=relationship,
-                changed_from=dates[0] + "T00:00:00Z",
-                changed_to=dates[1] + "T23:59:59Z",
-            )
-        else:
-            result = self.query_temporal_graph(
-                principal=principal, entity=entity, relationship=relationship,
-                as_of=dates[0] + "T23:59:59Z" if dates else None,
-            )
-        evidence = result["evidence"]
-        if not evidence:
-            answer = "I found no currently accessible evidence matching that question."
-        else:
-            answer = "\n".join(
-                f"{row['entity']} {row['relationship'].replace('_', ' ')} was "
-                f"{row['value']} from {row['validity']['from']} until "
-                f"{row['validity']['to']}. Source: "
-                f"{row['source']['artifact']} version "
-                f"{row['source']['version_id']} ({row['citation']})."
-                for row in evidence
-            )
-        return {
-            "answer": answer,
-            "evidence": evidence,
-            "access_filtered_count": result["access_filtered_count"],
-        }
-
     def resolve_entity(self, name: str, principal: Principal):
+        self.store.refresh()
         values = sorted({r.entity for r in self.store.records if name.lower() in r.entity.lower()
                          and self.source.check_access(r.document_id, principal)})
         return {"entities": values}
@@ -139,8 +82,6 @@ class SharePointTools:
     @staticmethod
     def schemas():
         descriptions = {
-            "ask_temporal": ("Ask a natural-language temporal SharePoint question",
-                             {"question": "string"}),
             "search_sharepoint_current": ("Search current SharePoint content", {"query": "string"}),
             "resolve_entity": ("Resolve a business entity", {"name": "string"}),
             "query_temporal_graph": ("Query allow-listed temporal facts", {

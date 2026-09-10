@@ -1,72 +1,64 @@
 # SharePoint Temporal Query Agent
 
-A local and AWS-deployed vertical slice for asking natural-language questions
-about current and historical SharePoint-like content.
-
-SharePoint and Microsoft Graph are currently mocked. The remainder of the
-architecture uses real AWS services and preserves a swappable `ContentSource`
-boundary for the future Graph connector.
+A local and AWS-deployable vertical slice for natural-language questions about
+current and historical SharePoint-like content. SharePoint and Microsoft Graph
+are mocked behind a swappable `ContentSource` boundary.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    U[Client] -->|Synchronous: natural-language prompt| O
+    U[Client] -->|Cognito JWT + prompt| O[AgentCore HTTP orchestrator]
+    O -->|Bedrock Converse| B[Amazon Nova Lite]
+    O -->|Cognito JWT + MCP| M[AgentCore MCP tools]
 
-    subgraph AgentCore
-      O[HTTP Orchestrator Runtime<br/>Amazon Nova Lite]
-      T[MCP Tools Runtime<br/>six structured tools]
-      G[Gateway<br/>optional Lambda target]
-    end
+    Z[(S3 versioned CodeZip<br/>runtime/runtime.zip)]
+    Z -.->|runtime_agent.py| O
+    Z -.->|runtime_tools.py| M
 
-    O -->|Synchronous: authenticated MCP| T
-    O -->|Synchronous: Converse tool use| B[Amazon Bedrock]
+    M --> D[(DynamoDB temporal facts)]
+    M --> C[MockContentSource<br/>current search, versions, access]
 
-    T -->|Synchronous queries| D[(DynamoDB temporal facts)]
-    T -->|Synchronous evidence reads| S3[(S3 immutable versions)]
-    T -->|Current authorization| C[ContentSource]
-
-    SC[Source change] -.->|Asynchronous| Q[SQS]
-    Q -.->|Asynchronous batch| L[Lambda ingestion]
+    S[Source change + exact version] -.-> Q[SQS]
+    S -.-> A[(S3 immutable versions)]
+    Q -.-> L[Lambda ingestion]
+    Z -.->|aws_lambda.handlers.ingest| L
+    A -.-> L
     L -.-> D
-    L -.-> S3
-    L -.-> ST[(DynamoDB source state)]
-
-    D -.->|Asynchronous projection| N[(Private Neptune Analytics)]
-    S3 -.->|Asynchronous ingestion job| KB[Bedrock Knowledge Base]
-    KB -.-> V[(S3 Vectors)]
+    L -.-> ST[(DynamoDB event state)]
 ```
 
-Solid arrows are synchronous query operations. Dashed arrows are asynchronous
-ingestion, projection, and indexing.
+The query path is synchronous. Source ingestion is asynchronous and eventually
+consistent.
 
-### AgentCore runtimes
+### Runtime boundaries
 
-The conversational and evidence boundaries are deployed independently:
-
-| Runtime | Protocol | Responsibility |
+| Runtime | Entry point | Responsibility |
 |---|---|---|
-| `sharepoint_temporal_orchestrator` | HTTP `/invocations`, port 8080 | Interpret natural language, select tools with Nova Lite, synthesize cited answers |
-| `sharepoint_temporal_tools` | MCP `/mcp`, port 8000 | Execute structured retrieval and authorization operations |
+| `sharepoint_temporal_orchestrator` | `runtime_agent.py`, HTTP `/invocations` | CodeZip Python runtime for prompt interpretation and cited answers |
+| `sharepoint_temporal_tools` | `runtime_tools.py`, MCP `/mcp` | CodeZip Python runtime for structured temporal retrieval and access checks |
 
-The orchestrator calls tools only through the authenticated MCP runtime. It does
-not load the temporal database directly. The tools runtime does not run a model.
+Both runtimes reference the same immutable, versioned CodeZip artifact in S3
+and select different entry points. The MCP process listens on
+`0.0.0.0:8000/mcp`; the HTTP orchestrator listens on
+`0.0.0.0:8080/invocations`. Docker, ECR and CodeBuild are not required.
 
-## Core behavior
+The ZIP contains application code, fixtures, Lambda code and Linux ARM64
+dependencies. AgentCore starts the selected entrypoint; Lambda uses the handler
+from the same artifact.
 
-- Bitemporal facts use `valid_from`, `valid_to`, `recorded_from`, and
-  `recorded_to`.
-- Immutable source versions carry source IDs, provenance, and citations.
-- Late and out-of-order events preserve their observation time.
-- Conflicting claims remain separate evidence instead of being silently merged.
+## Temporal and security behavior
+
+- Facts carry `valid_from`, `valid_to`, `recorded_from`, and `recorded_to`.
+- Source versions are immutable and include provenance and stable citations.
+- Late and out-of-order events preserve their recorded time.
+- Conflicting claims remain separate evidence.
 - Deletions produce tombstones.
 - Historical evidence is returned only when the caller currently has access to
   the source document.
-- No arbitrary Cypher, Gremlin, SPARQL, SQL, or graph-query tool is exposed.
+- No arbitrary SQL, Cypher, Gremlin or SPARQL query surface is exposed.
 
-## MCP tools
-
-The tools runtime exposes exactly:
+The MCP runtime exposes exactly six tools:
 
 - `search_sharepoint_current`
 - `resolve_entity`
@@ -75,27 +67,20 @@ The tools runtime exposes exactly:
 - `compare_document_versions`
 - `check_access`
 
-Amazon Nova Lite receives these tool schemas through Bedrock Converse. Tool
-results are the grounding source for the final answer.
-
 ## Run locally
 
 Requirements:
 
 - Python 3.11 or newer
-- No third-party packages for local fixture mode
-
-Run the tests:
+- No AWS credentials or third-party packages for fixture mode
 
 ```bash
 python3 -m unittest discover -v
 ```
 
-Ask a local question:
-
 ```bash
 python3 -m temporal_agent.cli ask \
-  "Who was owner of Atlas as of 2024-02-01?"
+  "Who owned Atlas on 2024-02-01?"
 ```
 
 Start the combined local development server:
@@ -104,151 +89,152 @@ Start the combined local development server:
 python3 -m temporal_agent.cli serve --port 8080
 ```
 
-The local server is a development convenience. AWS uses the two separate
-runtime images in `Dockerfile.agent` and `Dockerfile.tools`.
+## Deploy to AWS
 
-## Run the AWS demo
+The deployment creates:
 
-The demo command discovers physical resource identifiers from CloudFormation
-and AgentCore APIs. No account IDs, runtime IDs, Cognito IDs, or token URLs are
-hardcoded in the repository.
+- AgentCore HTTP and MCP CodeZip runtimes
+- Cognito machine-to-machine OAuth protection
+- S3 immutable source and runtime artifacts
+- DynamoDB temporal-fact and ingestion-state tables
+- SQS, DLQ and a Lambda ingestion worker
 
-```bash
-python3 scripts/ask_aws.py \
-  --profile default \
-  --region <region> \
-  "Who owned Atlas on 2024-02-01?"
-```
-
-Example questions:
-
-```text
-Who owned Atlas on 2024-04-01?
-What changed about Atlas between 2024-02-01 and 2024-04-01?
-What was the retention policy about Customer Records on 2024-04-02?
-What was the risk about Atlas on 2024-03-01?
-What was the exception status about Atlas on 2024-06-05?
-Who owned Orion on 2024-02-01?
-```
-
-The helper:
-
-1. Reads CloudFormation outputs.
-2. Locates the HTTP orchestrator by logical runtime name.
-3. Obtains a short-lived Cognito token without printing the client secret.
-4. Sends the natural-language prompt to AgentCore.
-5. Prints the evidence-grounded answer.
-
-## Ingestion model
-
-Production change ingestion is asynchronous:
-
-```text
-source change → SQS → Lambda → S3/DynamoDB
-```
-
-Also asynchronous:
-
-- Neptune graph bulk projection
-- Bedrock Knowledge Base ingestion
-- S3 Vector embedding writes
-
-Synchronous exceptions:
-
-- initial fixture bootstrap with `scripts/seed_aws.py`
-- local in-process replay for tests
-- queries against already materialized state
-
-The query path is eventually consistent with the source and does not wait for
-SQS, Neptune, or Knowledge Base jobs to complete.
-
-## Fixtures
-
-`fixtures/repository.json` contains exact source versions with:
-
-- document and version IDs
-- path and title
-- modification and business-effective dates
-- extracted claims
-- current readers
-- deletion status
-- source provenance
-
-`fixtures/changes.jsonl` is the replayable logical-clock event stream. It covers:
-
-- ownership changes
-- policy effective dates that differ from modification dates
-- rename
-- deletion
-- late and out-of-order events
-- conflicting claims
-- permission changes
-
-## Deploy
-
-The infrastructure template and deployment script are:
-
-- `infra/core.yaml`
-- `infra/deploy.sh`
-
-Deploy using your own profile and region:
+Deploy:
 
 ```bash
 AWS_PROFILE=<profile> AWS_REGION=<region> bash infra/deploy.sh
 ```
 
-The deployment provisions:
+The script packages one CodeZip artifact containing both runtime entry points
+and the Lambda handler, uploads it to versioned S3, deploys the Lambda worker,
+seeds the fixtures, and creates or updates both AgentCore runtimes.
+Dependencies are resolved for Linux ARM64/Python 3.13, so deployment packaging
+does not depend on the developer workstation architecture.
 
-- AgentCore HTTP orchestrator and MCP tools runtimes
-- Cognito OAuth protection
-- S3 evidence archive
-- SQS and DLQ
-- Lambda ingestion worker
-- DynamoDB temporal and source-state tables
-- private Neptune Analytics graph
-- Bedrock Knowledge Base and S3 Vectors
-- ECR and CodeBuild ARM64 image pipeline
-- AgentCore Gateway boundary
+For an environment previously deployed with the container design, updating the
+stack removes the obsolete CodeBuild project. The old ECR repository may remain
+because it was configured with `DeletionPolicy: Retain`; it is not used by the
+CodeZip runtimes and can be removed separately after verification.
 
-Physical identifiers are intentionally omitted from source control. See
-`DEPLOYED.md` for discovery commands.
+### Invoke the orchestrator
 
-## Security
+`scripts/ask_aws.py` is a convenience client, not the application entry point.
+The application entry point is the orchestrator's `/invocations` endpoint.
 
-- Both runtimes require Cognito JWTs.
-- Runtime-to-runtime MCP calls use short-lived OAuth tokens.
-- The model can call only allow-listed tools.
-- Authorization occurs in the tools runtime before evidence is returned.
-- S3 public access is blocked.
-- S3 and SQS use server-side encryption.
-- DynamoDB point-in-time recovery is enabled.
-- Neptune has no public connectivity.
-- Credentials and local secret files are excluded by `.gitignore`.
+```bash
+python3 scripts/ask_aws.py \
+  --profile <profile> \
+  --region <region> \
+  "Who owned Atlas on 2024-02-01?"
+```
 
-Do not trust caller-provided identity headers in production. Replace the demo
-identity path with verified Entra ID claims and immutable user/group object IDs.
+### Test prompts
 
-## Production gaps
+| Prompt | Expected behavior |
+|---|---|
+| `Who owned Atlas on 2024-02-01?` | Alice, version 1.0 |
+| `Who owned Atlas on 2024-04-01?` | Bob, version 2.0 |
+| `What changed about Atlas between 2024-02-01 and 2024-04-01?` | Ownership change with evidence |
+| `What was the retention policy about Customer Records on 2024-03-15?` | No effective policy |
+| `What was the retention policy about Customer Records on 2024-04-02?` | Seven years, effective April 1 |
+| `What was the risk about Atlas on 2024-03-01?` | Both conflicting risk claims |
+| `What was the exception status about Atlas on 2024-03-01?` | Late-arriving `open` claim |
+| `Who owned Orion on 2024-02-01?` | No evidence because current access was revoked |
+| `Who was the owner of Legacy Approval as of 2024-02-01?` | No evidence because the source is deleted |
+
+## Authentication assumption
+
+Cognito currently authenticates workloads, not users:
+
+```text
+demo client --client-credentials JWT--> orchestrator
+orchestrator --client-credentials JWT--> MCP tools
+```
+
+The demo principal is forwarded through AgentCore's allow-listed custom headers.
+Production must derive the user and group IDs from a verified Entra ID JWT and
+pass a signed or platform-protected identity context to MCP. Caller-provided
+identity headers must not be trusted in production.
+
+## Ingestion
+
+`fixtures/changes.jsonl` is replayed through:
+
+```text
+source adapter → S3 exact version
+              → SQS → Lambda → DynamoDB
+```
+
+The source-state table makes event handling idempotent. The deployed Lambda
+repairs valid-time intervals after inserts. Production still needs transactional
+updates and complete recorded-time interval closure.
+
+Local tests replay the same stream synchronously with a controllable logical
+clock.
+
+## Fixtures
+
+`fixtures/repository.json` includes:
+
+- ownership changes and rename
+- policy effective dates different from modification dates
+- deletion and tombstones
+- late and out-of-order versions
+- conflicting claims
+- permission changes
+
+`fixtures/changes.jsonl` contains stable event IDs and recorded timestamps.
+
+## Optional future Neptune path
+
+Neptune is not used by the current query path. Set `ENABLE_NEPTUNE=true` only
+to provision a graph for future bounded multi-hop work:
+
+```bash
+ENABLE_NEPTUNE=true AWS_PROFILE=<profile> AWS_REGION=<region> \
+  bash infra/deploy.sh
+```
+
+The planned tool accepts structured start entity, allow-listed relationships,
+`as_of`, direction and a capped hop count. It will never accept raw Cypher.
+DynamoDB and S3 remain authoritative; Neptune is a rebuildable projection. See
+`DESIGN.md` for the proposed multi-hop model.
+
+## Deliberate omissions
+
+- Bedrock Knowledge Bases and S3 Vectors: no current tool consumed them.
+- AgentCore Gateway: the application already has explicit orchestrator and MCP
+  runtime boundaries.
+- Docker, ECR and CodeBuild: both AgentCore runtimes use CodeZip.
+- Production Microsoft Graph and Entra integration: retained as interfaces and
+  documented production work.
+
+## Production work
 
 - Implement `MicrosoftGraphContentSource`.
-- Validate Entra ID tokens and expand current group membership.
-- Persist and renew Graph delta cursors and subscriptions.
-- Add transactional interval repair to incremental Lambda ingestion.
-- Expose recorded-time querying where required.
-- Version the claim-extraction model and include it in provenance.
-- Separate IAM roles further by runtime and worker responsibility.
-- Add tracing, ingestion-lag alarms, token metrics, budgets, and deployment
-  rollback automation.
+- Validate Entra JWTs and resolve immutable group membership.
+- Persist Graph delta cursors and subscriptions.
+- Perform transactional bitemporal interval repair during ingestion.
+- Replace DynamoDB scans with targeted query access patterns.
+- Version claim extraction and include model/prompt versions in provenance.
+- Add tracing, ingestion-lag alarms and adversarial authorization tests.
 
-## Documentation
+## Key files
 
-- `DESIGN.md`: detailed architecture and design decisions
-- `DEPLOYED.md`: identifier-free deployment discovery guide
-- `tests/test_vertical_slice.py`: behavioral coverage
+| Area | File |
+|---|---|
+| Orchestrator | `temporal_agent/orchestrator.py`, `temporal_agent/bedrock_agent.py` |
+| MCP tools | `temporal_agent/mcp.py`, `temporal_agent/tools.py` |
+| Source boundary | `temporal_agent/source.py` |
+| Temporal model | `temporal_agent/models.py`, `temporal_agent/store.py` |
+| AWS persistence | `temporal_agent/aws_backend.py` |
+| Ingestion worker | `aws_lambda/handlers.py` |
+| Deployment | `infra/core.yaml`, `infra/deploy.sh` |
+| Detailed design | `DESIGN.md` |
 
-## Cost and cleanup
+## Cleanup
 
-Managed AWS services can incur ongoing charges, particularly Neptune Analytics,
-AgentCore, Bedrock, and vector ingestion. Data resources use retention policies,
-and Neptune deletion protection is enabled. Review `infra/destroy.sh` and remove
-resources explicitly when the environment is no longer needed.
+S3 and DynamoDB are retained when the CloudFormation stack is deleted. AgentCore
+runtimes, the Lambda function and an optional Neptune graph are managed outside
+the stack and must be removed explicitly. A legacy ECR repository from the
+earlier container design may also require explicit removal.

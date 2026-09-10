@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import replace
 from typing import Iterable
 
 from .models import Principal, SourceVersion
@@ -76,19 +75,13 @@ class MockContentSource(ContentSource):
         subjects = {principal.id, *principal.groups}
         return bool(subjects & current.readers)
 
-    def apply_permission_override(self, document_id: str, readers: frozenset[str]) -> None:
-        versions = self._versions[document_id]
-        versions[-1] = replace(versions[-1], readers=readers)
-
-
 class MicrosoftGraphContentSource(ContentSource):
     """Production seam. Implement with Graph delta, versions and permissions APIs."""
 
     def __init__(self, tenant_id: str, site_id: str, credential: object):
         self.tenant_id, self.site_id, self.credential = tenant_id, site_id, credential
 
-    def _pending(self):
+    def _pending(self, *_args, **_kwargs):
         raise NotImplementedError("Wire Microsoft Graph SDK behind ContentSource")
 
     changes = list_versions = get_version = get_current = search_current = check_access = _pending
-
