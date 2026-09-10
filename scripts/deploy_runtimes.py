@@ -45,6 +45,7 @@ def main() -> None:
     parser.add_argument("--user-pool-id", required=True)
     parser.add_argument("--token-url", required=True)
     parser.add_argument("--table", required=True)
+    parser.add_argument("--source-gateway-url", required=True)
     args = parser.parse_args()
 
     session = boto3.Session(profile_name=args.profile, region_name=args.region)
@@ -128,6 +129,10 @@ def main() -> None:
         {
             "AWS_REGION": args.region,
             "TEMPORAL_FACTS_TABLE": args.table,
+            "SOURCE_GATEWAY_URL": args.source_gateway_url,
+            "SOURCE_GATEWAY_USER_POOL_ID": args.user_pool_id,
+            "SOURCE_GATEWAY_CLIENT_ID": args.client_id,
+            "SOURCE_GATEWAY_TOKEN_URL": args.token_url,
         },
     )
     tools_arn = (

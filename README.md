@@ -17,10 +17,14 @@ flowchart TD
     Z -.->|runtime_tools.py| M
 
     M --> D[(DynamoDB temporal facts)]
-    M --> C[MockContentSource<br/>current search, versions, access]
+    M -->|Cognito JWT + MCP| G[AgentCore Gateway<br/>ContentSource contract]
+    G -->|IAM invoke| C[Mock SharePoint Lambda target]
+    C --> F[(S3 mock repository<br/>current state + versions)]
 
-    S[Source change + exact version] -.-> Q[SQS]
-    S -.-> A[(S3 immutable versions)]
+    E[EventBridge schedule] -.-> Y[Lambda source sync]
+    Y -->|changes + exact versions| G
+    Y -.-> Q[SQS]
+    Y -.-> A[(S3 immutable versions)]
     Q -.-> L[Lambda ingestion]
     Z -.->|aws_lambda.handlers.ingest| L
     A -.-> L
@@ -30,6 +34,12 @@ flowchart TD
 
 The query path is synchronous. Source ingestion is asynchronous and eventually
 consistent.
+
+AgentCore Gateway is the permanent SharePoint connectivity boundary. The
+current target is a fixture-backed Lambda implementing the full `ContentSource`
+contract. In production, replace that target with a Microsoft Graph-backed
+target; the orchestrator, temporal MCP tools, policy enforcement, and answer
+format do not change.
 
 ### Runtime boundaries
 
@@ -46,6 +56,10 @@ and select different entry points. The MCP process listens on
 The ZIP contains application code, fixtures, Lambda code and Linux ARM64
 dependencies. AgentCore starts the selected entrypoint; Lambda uses the handler
 from the same artifact.
+
+The language model sees only the six policy-enforcing temporal tools. The six
+lower-level source connector operations are available only to the MCP tools
+runtime through Gateway and are never placed in the model's tool catalog.
 
 Natural-language requests always use Amazon Bedrock. There is no deterministic
 planner, combined local server, or local `ask` command. If Bedrock or the MCP
@@ -92,9 +106,11 @@ local execution mode.
 The deployment creates:
 
 - AgentCore HTTP and MCP CodeZip runtimes
+- AgentCore Gateway with a mock SharePoint Lambda target
 - Cognito machine-to-machine OAuth protection
 - S3 immutable source and runtime artifacts
 - DynamoDB temporal-fact and ingestion-state tables
+- scheduled Lambda source sync
 - SQS, DLQ and a Lambda ingestion worker
 
 Deploy:
@@ -104,8 +120,10 @@ AWS_PROFILE=<profile> AWS_REGION=<region> bash infra/deploy.sh
 ```
 
 The script packages one CodeZip artifact containing both runtime entry points
-and the Lambda handler, uploads it to versioned S3, deploys the Lambda worker,
-seeds the fixtures, and creates or updates both AgentCore runtimes.
+and all Lambda handlers, uploads it to versioned S3, deploys the ingestion,
+source-sync, and mock-source functions, creates or updates Gateway and its
+source target, seeds the fixtures, performs an initial Gateway delta sync, and
+creates or updates both AgentCore runtimes.
 Dependencies are resolved for Linux ARM64/Python 3.13, so deployment packaging
 does not depend on the developer workstation architecture.
 
@@ -159,6 +177,7 @@ Cognito currently authenticates workloads, not users:
 ```text
 demo client --client-credentials JWT--> orchestrator
 orchestrator --client-credentials JWT--> MCP tools
+MCP tools --client-credentials JWT--> AgentCore Gateway
 ```
 
 The demo principal is forwarded through AgentCore's allow-listed custom headers.
@@ -171,16 +190,29 @@ identity headers must not be trusted in production.
 `fixtures/changes.jsonl` is replayed through:
 
 ```text
-source adapter → S3 exact version
-              → SQS → Lambda → DynamoDB
+EventBridge/manual trigger
+  → source-sync Lambda
+  → AgentCore Gateway
+  → ContentSource changes + exact versions
+  → S3 immutable version + SQS
+  → ingestion Lambda
+  → DynamoDB
 ```
 
-The source-state table makes event handling idempotent. The deployed Lambda
-repairs valid-time intervals after inserts. Production still needs transactional
-updates and complete recorded-time interval closure.
+The source-sync Lambda persists the opaque delta cursor, archives every exact
+version, and publishes changes asynchronously. Cursor advancement and
+downstream event IDs make replay at-least-once and idempotent. The ingestion
+Lambda repairs valid-time intervals after inserts. Production still needs
+transactional updates and complete recorded-time interval closure.
 
 Unit tests replay the same stream through a test-only in-memory store with a
 controllable logical clock.
+
+Gateway exposes source `changes(cursor)`, version enumeration, exact version
+retrieval, current retrieval, search, and authorization operations. The current
+scheduled poller uses those operations against the mock target. A production
+Microsoft Graph target supplies the same operations; Graph subscriptions may
+also trigger the same sync Lambda for lower latency.
 
 ## Fixtures
 
@@ -213,8 +245,6 @@ DynamoDB and S3 remain authoritative; Neptune is a rebuildable projection. See
 ## Deliberate omissions
 
 - Bedrock Knowledge Bases and S3 Vectors: no current tool consumed them.
-- AgentCore Gateway: the application already has explicit orchestrator and MCP
-  runtime boundaries.
 - Docker, ECR and CodeBuild: both AgentCore runtimes use CodeZip.
 - The combined local server, CLI `ask` command and deterministic parser:
   deployed natural-language requests always use Bedrock.
@@ -223,7 +253,8 @@ DynamoDB and S3 remain authoritative; Neptune is a rebuildable projection. See
 
 ## Production work
 
-- Implement `MicrosoftGraphContentSource`.
+- Replace the mock Gateway target with a Microsoft Graph implementation of the
+  same six-operation `ContentSource` contract.
 - Validate Entra JWTs and resolve immutable group membership.
 - Persist Graph delta cursors and subscriptions.
 - Perform transactional bitemporal interval repair during ingestion.
@@ -237,16 +268,19 @@ DynamoDB and S3 remain authoritative; Neptune is a rebuildable projection. See
 |---|---|
 | Orchestrator | `temporal_agent/orchestrator.py`, `temporal_agent/bedrock_agent.py` |
 | MCP tools | `temporal_agent/mcp.py`, `temporal_agent/tools.py` |
-| Source boundary | `temporal_agent/source.py` |
+| Source boundary | `temporal_agent/source.py`, `temporal_agent/gateway_client.py` |
+| Gateway contract and mock target | `temporal_agent/gateway_contract.py`, `aws_lambda/source_gateway.py` |
 | Temporal model | `temporal_agent/models.py`, `temporal_agent/store.py` |
 | AWS persistence | `temporal_agent/aws_backend.py` |
-| Ingestion worker | `aws_lambda/handlers.py` |
+| Source sync and ingestion | `aws_lambda/source_sync.py`, `aws_lambda/handlers.py` |
 | Deployment | `infra/core.yaml`, `infra/deploy.sh` |
 | Detailed design | `DESIGN.md` |
 
 ## Cleanup
 
 S3 and DynamoDB are retained when the CloudFormation stack is deleted. AgentCore
-runtimes, the Lambda function and an optional Neptune graph are managed outside
-the stack and must be removed explicitly. A legacy ECR repository from the
-earlier container design may also require explicit removal.
+runtimes, Gateway and its target, three Lambda functions, the source-sync
+schedule, and an optional Neptune
+graph are managed outside the stack and must be removed explicitly. A legacy
+ECR repository from the earlier container design may also require explicit
+removal.

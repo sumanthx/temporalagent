@@ -140,6 +140,77 @@ Resources:
                 Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
                 Resource: '*'
 
+  SourceConnectorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: MockSharePointSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion, s3:ListBucket]
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub '${ArtifactBucket.Arn}/*'
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: '*'
+
+  SourceSyncRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: lambda.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: SharePointSourceSync
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [dynamodb:GetItem, dynamodb:PutItem]
+                Resource: !GetAtt SourceStateTable.Arn
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: !Sub '${ArtifactBucket.Arn}/versions/*'
+              - Effect: Allow
+                Action: sqs:SendMessage
+                Resource: !GetAtt ChangeQueue.Arn
+              - Effect: Allow
+                Action: cognito-idp:DescribeUserPoolClient
+                Resource: !GetAtt AgentUserPool.Arn
+              - Effect: Allow
+                Action: [logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents]
+                Resource: '*'
+
+  GatewayRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: {Service: bedrock-agentcore.amazonaws.com}
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: InvokeSharePointSource
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !Sub 'arn:${AWS::Partition}:lambda:${AWS::Region}:${AWS::AccountId}:function:${ProjectName}-mock-source'
+
   AgentUserPool:
     Type: AWS::Cognito::UserPool
     Properties:
@@ -185,6 +256,9 @@ Outputs:
   SourceStateTable: {Value: !Ref SourceStateTable}
   RuntimeRoleArn: {Value: !GetAtt RuntimeRole.Arn}
   IngestionRoleArn: {Value: !GetAtt IngestionRole.Arn}
+  SourceConnectorRoleArn: {Value: !GetAtt SourceConnectorRole.Arn}
+  SourceSyncRoleArn: {Value: !GetAtt SourceSyncRole.Arn}
+  GatewayRoleArn: {Value: !GetAtt GatewayRole.Arn}
   AgentUserPoolId: {Value: !Ref AgentUserPool}
   AgentMachineClientId: {Value: !Ref AgentMachineClient}
   AgentIssuerUrl:

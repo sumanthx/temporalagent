@@ -37,6 +37,9 @@ output() {
 
 ROLE="$(output RuntimeRoleArn)"
 INGESTION_ROLE="$(output IngestionRoleArn)"
+SOURCE_CONNECTOR_ROLE="$(output SourceConnectorRoleArn)"
+SOURCE_SYNC_ROLE="$(output SourceSyncRoleArn)"
+GATEWAY_ROLE="$(output GatewayRoleArn)"
 TABLE="$(output TemporalFactsTable)"
 STATE_TABLE="$(output SourceStateTable)"
 QUEUE="$(output ChangeQueueUrl)"
@@ -61,6 +64,31 @@ if [[ "$PACKAGE_VERSION" != "None" && "$PACKAGE_VERSION" != "null" ]]; then
   VERSION_ARGS=(--version-id "$PACKAGE_VERSION")
 fi
 
+SOURCE_CONNECTOR="$(python3 scripts/deploy_source_connector.py \
+  --profile "$PROFILE" \
+  --region "$REGION" \
+  --function-name "${PROJECT}-mock-source" \
+  --role-arn "$SOURCE_CONNECTOR_ROLE" \
+  --bucket "$BUCKET" \
+  --key runtime/runtime.zip \
+  "${VERSION_ARGS[@]}" \
+  --artifact-bucket "$BUCKET")"
+SOURCE_CONNECTOR_ARN="$(python3 -c \
+  'import json,sys; print(json.loads(sys.argv[1])["function_arn"])' \
+  "$SOURCE_CONNECTOR")"
+
+GATEWAY="$(python3 scripts/deploy_gateway.py \
+  --profile "$PROFILE" \
+  --region "$REGION" \
+  --gateway-name "${PROJECT}-source" \
+  --role-arn "$GATEWAY_ROLE" \
+  --function-arn "$SOURCE_CONNECTOR_ARN" \
+  --issuer "$ISSUER" \
+  --client-id "$CLIENT_ID")"
+GATEWAY_URL="$(python3 -c \
+  'import json,sys; print(json.loads(sys.argv[1])["gateway_url"])' \
+  "$GATEWAY")"
+
 python3 scripts/deploy_ingestion.py \
   --profile "$PROFILE" \
   --region "$REGION" \
@@ -77,7 +105,25 @@ python3 scripts/seed_aws.py \
   --profile "$PROFILE" \
   --bucket "$BUCKET" \
   --queue-url "$QUEUE" \
-  --region "$REGION"
+  --region "$REGION" \
+  --skip-queue
+
+python3 scripts/deploy_source_sync.py \
+  --profile "$PROFILE" \
+  --region "$REGION" \
+  --function-name "${PROJECT}-source-sync" \
+  --role-arn "$SOURCE_SYNC_ROLE" \
+  --bucket "$BUCKET" \
+  --key runtime/runtime.zip \
+  "${VERSION_ARGS[@]}" \
+  --artifact-bucket "$BUCKET" \
+  --queue-url "$QUEUE" \
+  --state-table "$STATE_TABLE" \
+  --gateway-url "$GATEWAY_URL" \
+  --user-pool-id "$USER_POOL_ID" \
+  --client-id "$CLIENT_ID" \
+  --token-url "$TOKEN_URL"
+
 EXPECTED_EVENTS="$(grep -cve '^[[:space:]]*$' fixtures/changes.jsonl)"
 python3 scripts/wait_ingestion.py \
   --profile "$PROFILE" \
@@ -116,7 +162,8 @@ RUNTIMES="$(python3 scripts/deploy_runtimes.py \
   --client-id "$CLIENT_ID" \
   --user-pool-id "$USER_POOL_ID" \
   --token-url "$TOKEN_URL" \
-  --table "$TABLE")"
+  --table "$TABLE" \
+  --source-gateway-url "$GATEWAY_URL")"
 
 cat <<EOF
 Stack: $STACK
@@ -124,6 +171,9 @@ Artifact bucket: $BUCKET
 Temporal table: $TABLE
 Change queue: $QUEUE
 Ingestion function: ${PROJECT}-ingestion
+Source connector function: ${PROJECT}-mock-source
+Source sync function: ${PROJECT}-source-sync
+AgentCore Gateway: ${PROJECT}-source
 Neptune graph: ${GRAPH_ID:-disabled}
 AgentCore runtimes: $RUNTIMES
 EOF

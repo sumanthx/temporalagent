@@ -25,6 +25,8 @@ Implemented:
 
 - Bedrock-powered AgentCore orchestrator
 - separate MCP tools runtime
+- permanent AgentCore Gateway source boundary
+- fixture-backed mock SharePoint Gateway target
 - mock current search, exact versions, delta events and authorization
 - bitemporal facts, tombstones, provenance and citations
 - SQS/Lambda ingestion with event idempotency
@@ -59,10 +61,14 @@ flowchart TD
     O -->|Cognito JWT + MCP| M
 
     M --> D[(DynamoDB temporal facts)]
-    M --> C[ContentSource<br/>mock now, Graph later]
+    M -->|Cognito JWT + MCP| G[AgentCore Gateway<br/>ContentSource tools]
+    G -->|IAM invoke| C[Mock SharePoint Lambda target]
+    C --> F[(S3 mock repository)]
 
-    S[Source change + exact version] -.-> Q[SQS]
-    S -.-> A[(S3 immutable versions)]
+    E[EventBridge schedule] -.-> Y[Lambda source sync]
+    Y -->|changes + exact versions| G
+    Y -.-> Q[SQS]
+    Y -.-> A[(S3 immutable versions)]
     Q -.-> L[Lambda ingestion]
     Z -.->|handler: aws_lambda.handlers.ingest| L
     A -.-> L
@@ -88,6 +94,10 @@ There is no local application mode. The orchestrator always invokes Bedrock and
 always reaches tools through the separate authenticated MCP runtime. No
 deterministic parser or in-process tool fallback exists in the runtime code.
 
+Gateway is not a third agent runtime. It is a managed MCP routing and
+credential boundary between the temporal tools runtime and the source
+implementation. The model cannot call Gateway's source tools directly.
+
 ### 3.2 Shared artifact boundary
 
 | Consumer | Artifact configuration |
@@ -95,6 +105,8 @@ deterministic parser or in-process tool fallback exists in the runtime code.
 | HTTP orchestrator | `codeConfiguration`, Python 3.13, entrypoint `runtime_agent.py` |
 | MCP tools runtime | `codeConfiguration`, Python 3.13, entrypoint `runtime_tools.py` |
 | Lambda ingestion | Same S3 object/version, handler `aws_lambda.handlers.ingest` |
+| Lambda source sync | Same S3 object/version, handler `aws_lambda.source_sync.handle` |
+| Mock source target | Same S3 object/version, handler `aws_lambda.source_gateway.handle` |
 
 The versioned S3 object is the deployment unit. Runtime configuration, rather
 than a separate image, selects the executable boundary. The package includes
@@ -109,38 +121,50 @@ sequenceDiagram
     participant O as HTTP orchestrator
     participant B as Bedrock
     participant M as MCP tools
-    participant S as DynamoDB + ContentSource
+    participant D as DynamoDB
+    participant G as AgentCore Gateway
+    participant S as SharePoint source target
 
     User->>O: POST /invocations {"prompt": "..."}
     O->>B: Converse with six tool schemas
     B-->>O: toolUse
     O->>M: authenticated MCP call + demo principal
-    M->>S: temporal query
-    M->>S: current access check
-    S-->>M: authorized evidence
+    M->>D: temporal query
+    D-->>M: candidate historical evidence
+    M->>G: current source access check
+    G->>S: invoke source_check_access
+    S-->>G: current authorization result
+    G-->>M: authorization result
     M-->>O: structured result
     O->>B: toolResult
     B-->>O: cited answer
     O-->>User: answer + evidence + tool trace
 ```
 
-The orchestrator never reads DynamoDB directly. The MCP runtime never runs a
-conversational model.
+The orchestrator never reads DynamoDB or Gateway directly. The MCP runtime never
+runs a conversational model. It joins temporal candidates with current source
+authorization and fails closed when the source boundary is unavailable.
 
 ## 5. Ingestion flow
 
-1. The source emits a stable event ID, source version ID and recorded timestamp.
-2. SQS delivers the event to Lambda at least once.
-3. Lambda conditionally records `EVENT#{event_id}` in the source-state table.
-4. Lambda reads the exact immutable version from S3.
-5. Extracted claims are inserted into the temporal-facts table.
-6. Duplicate events and duplicate fact keys are ignored.
+1. EventBridge or a subscription trigger invokes the source-sync Lambda.
+2. Source sync reads its opaque cursor from the source-state table.
+3. It calls Gateway `source_changes`, then `source_get_version` for each event.
+4. It archives each exact version to S3 and publishes the event to SQS.
+5. It advances the cursor after all events are published.
+6. SQS delivers each event to the ingestion Lambda at least once.
+7. Ingestion conditionally records `EVENT#{event_id}` in the source-state table.
+8. Ingestion reads the exact immutable version from S3.
+9. Extracted claims are inserted into the temporal-facts table.
+10. Duplicate events and duplicate fact keys are ignored.
 
-The deployed worker repairs valid-time ordering after each insert and runs with
-one reserved concurrent execution for deterministic fixture replay. Production
-ingestion must make those repairs transactional and close superseded
-`recorded_to` intervals. A test-only in-memory materializer exercises the same
-valid-time semantics without acting as an application runtime.
+Cursor advancement occurs after publishing, so a partial failure can republish
+events; stable event IDs keep the downstream path idempotent. The deployed
+worker repairs valid-time ordering after each insert and runs with one reserved
+concurrent execution for deterministic fixture replay. Production ingestion
+must make those repairs transactional and close superseded `recorded_to`
+intervals. A test-only in-memory materializer exercises the same valid-time
+semantics without acting as an application runtime.
 
 Queries read the latest completed DynamoDB state and do not wait for ingestion.
 
@@ -159,11 +183,36 @@ check_access(document_id, principal)
 
 Implementations:
 
-- `MockContentSource`: active fixture-backed implementation.
-- `MicrosoftGraphContentSource`: production seam for Graph delta, DriveItem
-  versions, exact content and current permissions.
+- `GatewayContentSource`: active application adapter. It invokes the managed
+  AgentCore Gateway over authenticated MCP.
+- `MockContentSource`: fixture implementation hosted by the current Gateway
+  Lambda target.
+- `MicrosoftGraphContentSource`: interface/stub for the production Gateway
+  target implementing Graph delta, DriveItem versions, exact content and
+  current permissions.
 
-No Microsoft Graph type leaks beyond this boundary.
+Gateway publishes source operations with a `source_` prefix. Target-qualified
+tool names are discovered at runtime, so changing the target name does not
+change application code. No Microsoft Graph type leaks beyond this boundary.
+
+### 6.1 Production target replacement
+
+The application-facing contract remains:
+
+```text
+source_changes
+source_list_versions
+source_get_version
+source_get_current
+source_search_current
+source_check_access
+```
+
+Production replaces the fixture Lambda target with a Graph-backed Lambda,
+OpenAPI target, or remote MCP server implementing those operations. No change
+is required to the orchestrator, the six temporal tools, the bitemporal model,
+or evidence formatting. Microsoft Graph subscription and delta-polling setup is
+still required operational configuration for continuous ingestion.
 
 ## 7. MCP contract
 
@@ -231,6 +280,11 @@ For every candidate record, MCP calls `ContentSource.check_access` against the
 current source state before returning evidence. Exact-version retrieval and
 comparison use the same policy.
 
+The Gateway target evaluates current source permissions, but the temporal MCP
+owns the cross-cutting rule that historical evidence is filtered using that
+current decision. This keeps the policy in one place when the source target is
+replaced.
+
 ### 9.1 Current authentication assumption
 
 Cognito currently provides workload authentication:
@@ -238,6 +292,7 @@ Cognito currently provides workload authentication:
 ```text
 demo client --client credentials--> orchestrator
 orchestrator --client credentials--> MCP
+MCP --client credentials--> AgentCore Gateway
 ```
 
 The demo principal travels through explicitly allow-listed AgentCore custom
@@ -262,17 +317,25 @@ Caller-controlled principal headers must be rejected in production.
 - DynamoDB temporal-facts and source-state tables
 - AgentCore runtime role
 - Lambda ingestion role
+- Lambda source-connector role
+- Lambda source-sync role
+- AgentCore Gateway invocation role
 - Cognito resource server and machine client
 
 `infra/deploy.sh` then:
 
 1. packages both runtime entry points and Lambda dependencies into one CodeZip
 2. uploads the immutable artifact to versioned S3
-3. creates or updates the Lambda ingestion worker and SQS mapping
-4. archives and seeds fixtures
-5. creates or updates the HTTP and MCP CodeZip runtimes
+3. creates or updates the mock source Lambda
+4. creates or updates AgentCore Gateway and its source target
+5. creates or updates the Lambda ingestion worker and SQS mapping
+6. archives the mock fixtures without bypassing Gateway
+7. creates or updates the scheduled source-sync Lambda and performs an initial
+   delta sync through Gateway
+8. creates or updates the HTTP and MCP CodeZip runtimes
 
-Both AgentCore runtimes and Lambda share the same versioned S3 code artifact.
+Both AgentCore runtimes and all Lambda functions share the same versioned S3
+code artifact.
 The packaging step resolves binary dependencies for Linux ARM64/Python 3.13 and
 does not embed host-specific wheels.
 
@@ -340,7 +403,6 @@ The holistic review removed components that had no current consumer:
 - the remaining MCP Dockerfile, ECR repository and CodeBuild project after
   selecting AgentCore CodeZip for both runtimes
 - Bedrock Knowledge Base and S3 Vectors
-- AgentCore Gateway claims and the unused Gateway Lambda handler
 - the hidden `ask_temporal` pseudo-tool
 - Neptune seeding scripts that projected no useful multi-hop ontology
 - the combined local server and CLI `ask` command
@@ -356,6 +418,7 @@ These can return only when backed by a concrete tool and tested request path.
 | Out-of-order source event | Materializer repairs valid-time ordering |
 | Deleted source | Tombstone retained; access fails closed |
 | Permission removed | Historical evidence is filtered immediately |
+| Gateway or source target unavailable | Source operations fail closed; historical evidence is not returned |
 | MCP unavailable | Orchestrator fails rather than bypassing tools |
 | Bedrock tool error | Error is returned to the model as a failed tool result |
 | Optional Neptune unavailable | Current direct temporal questions are unaffected |
@@ -373,6 +436,9 @@ The suite covers:
 - deletion and tombstones
 - exact-version comparison
 - MCP allow-list enforcement
+- Gateway source-contract delegation and source/agent tool separation
+- asynchronous Gateway delta sync, exact-version archiving, and cursor replay
+- Gateway MCP JSON/SSE decoding and deployment payload validation
 - Bedrock tool selection and orchestrator delegation using a fake model client
 
 Run:
@@ -388,7 +454,8 @@ AgentCore HTTP runtime.
 
 ### Phase 1: Microsoft identity and source
 
-- implement `MicrosoftGraphContentSource`
+- replace the mock Gateway target with a Microsoft Graph-backed implementation
+  of the stable source contract
 - validate Entra JWTs and group claims
 - persist Graph delta cursors and subscriptions
 - retrieve exact DriveItem versions and current permissions

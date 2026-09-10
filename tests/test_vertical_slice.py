@@ -1,7 +1,14 @@
 import unittest
+import json
+import urllib.request
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import boto3
+from botocore.validate import validate_parameters
+
+from aws_lambda.source_gateway import dispatch as dispatch_source_gateway
+from aws_lambda.source_sync import sync_once
 from temporal_agent.app import (
     build_orchestrator_runtime,
     build_tools_runtime,
@@ -15,8 +22,15 @@ from temporal_agent.models import MAX_TIME, Principal
 from temporal_agent.orchestrator import AgentOrchestrator
 from temporal_agent.server import principal_from_headers
 from temporal_agent.store import TemporalGraphStore
+from temporal_agent.source import GatewayContentSource
 from temporal_agent.tools import SharePointTools
 from aws_lambda.handlers import _repair_valid_intervals
+from temporal_agent.gateway_client import GatewayMCPClient
+from temporal_agent.gateway_contract import (
+    SOURCE_GATEWAY_TOOL_NAMES,
+    SOURCE_GATEWAY_TOOLS,
+)
+from scripts.deploy_gateway import gateway_configuration, target_configuration
 from scripts.deploy_runtimes import artifact_type, build_code_artifact
 
 
@@ -153,6 +167,199 @@ class VerticalSliceTests(unittest.TestCase):
         self.assertEqual("16", cursor)
         self.assertEqual(before, len(self.app.store.records))
 
+    def test_gateway_content_source_preserves_source_contract(self):
+        source = self.app.source
+
+        class DirectGatewayClient:
+            def call(self, tool_name, **arguments):
+                return dispatch_source_gateway(source, tool_name, arguments)
+
+        gateway_source = GatewayContentSource(DirectGatewayClient())
+        self.assertEqual("16", gateway_source.changes()[1])
+        self.assertEqual(
+            ["1.0", "2.0"],
+            [
+                version.version_id
+                for version in gateway_source.list_versions(
+                    "ownership-register")
+            ],
+        )
+        self.assertEqual(
+            "Bob",
+            gateway_source.get_current(
+                "ownership-register").claims[0]["value"],
+        )
+        self.assertTrue(
+            gateway_source.check_access("ownership-register", self.alice)
+        )
+        self.assertFalse(
+            gateway_source.check_access("secret-plan", self.alice)
+        )
+
+    def test_gateway_source_tools_are_separate_from_agent_tools(self):
+        self.assertEqual(
+            set(SOURCE_GATEWAY_TOOL_NAMES),
+            {tool["name"] for tool in SOURCE_GATEWAY_TOOLS},
+        )
+        self.assertTrue(
+            set(SOURCE_GATEWAY_TOOL_NAMES).isdisjoint(self.app.tools.NAMES)
+        )
+        with self.assertRaisesRegex(ValueError, "unknown ContentSource"):
+            dispatch_source_gateway(
+                self.app.source,
+                "query_temporal_graph",
+                {},
+            )
+
+    def test_async_source_sync_uses_gateway_delta_and_exact_versions(self):
+        source = self.app.source
+
+        class DirectGatewayClient:
+            def call(self, tool_name, **arguments):
+                return dispatch_source_gateway(source, tool_name, arguments)
+
+        class FakeStateTable:
+            def __init__(self):
+                self.item = {}
+
+            def get_item(self, **_kwargs):
+                return {"Item": self.item} if self.item else {}
+
+            def put_item(self, Item):
+                self.item = Item
+
+        class FakeS3:
+            def __init__(self):
+                self.objects = []
+
+            def put_object(self, **kwargs):
+                self.objects.append(kwargs)
+
+        class FakeSQS:
+            def __init__(self):
+                self.messages = []
+
+            def send_message(self, **kwargs):
+                self.messages.append(kwargs)
+
+        state, storage, queue = FakeStateTable(), FakeS3(), FakeSQS()
+        first = sync_once(
+            GatewayContentSource(DirectGatewayClient()),
+            state,
+            storage,
+            queue,
+            "artifact-bucket",
+            "queue-url",
+            "mock-sharepoint",
+        )
+        second = sync_once(
+            GatewayContentSource(DirectGatewayClient()),
+            state,
+            storage,
+            queue,
+            "artifact-bucket",
+            "queue-url",
+            "mock-sharepoint",
+        )
+        self.assertEqual(16, first["queued"])
+        self.assertEqual("16", first["cursor"])
+        self.assertEqual(0, second["queued"])
+        self.assertEqual(16, len(storage.objects))
+        self.assertEqual(16, len(queue.messages))
+        self.assertEqual(
+            "SOURCE_CURSOR#mock-sharepoint",
+            state.item["pk"],
+        )
+
+    def test_gateway_mcp_client_decodes_json_and_sse(self):
+        payload = {"jsonrpc": "2.0", "id": "1", "result": {"tools": []}}
+        self.assertEqual(
+            payload,
+            GatewayMCPClient._decode_response(json.dumps(payload)),
+        )
+        self.assertEqual(
+            payload,
+            GatewayMCPClient._decode_response(
+                f"event: message\ndata: {json.dumps(payload)}\n\n"
+            ),
+        )
+
+    def test_gateway_mcp_client_sends_stateless_protocol_metadata(self):
+        client = GatewayMCPClient(
+            "https://gateway.example.test",
+            "pool",
+            "client",
+            "https://token.example.test",
+            "us-east-1",
+        )
+        client._access_token = lambda: "token"
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def read(self):
+                return json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": "1",
+                    "result": {"tools": []},
+                }).encode()
+
+        with patch.object(
+            urllib.request,
+            "urlopen",
+            return_value=FakeResponse(),
+        ) as urlopen:
+            client._request("tools/list", {})
+        request = urlopen.call_args.args[0]
+        body = json.loads(request.data)
+        self.assertEqual(
+            "2026-07-28",
+            body["params"]["_meta"][
+                "io.modelcontextprotocol/protocolVersion"
+            ],
+        )
+        self.assertEqual("tools/list", request.headers["Mcp-method"])
+        self.assertEqual(
+            "2026-07-28",
+            request.headers["Mcp-protocol-version"],
+        )
+
+    def test_gateway_deployment_payloads_match_sdk_contract(self):
+        service = boto3.Session()._session.get_service_model(
+            "bedrock-agentcore-control")
+        account = "123456" * 2
+        create_gateway = gateway_configuration(
+            "sharepoint-temporal-agent-source",
+            f"arn:aws:iam::{account}:role/gateway",
+            "https://issuer.example.test/pool",
+            "client-id",
+        )
+        create_target = {
+            "gatewayIdentifier": "gateway-id",
+            **target_configuration(
+                f"arn:aws:lambda:us-east-1:{account}:"
+                "function:mock-source"
+            ),
+        }
+        validate_parameters(
+            create_gateway,
+            service.operation_model("CreateGateway").input_shape,
+        )
+        validate_parameters(
+            create_target,
+            service.operation_model("CreateGatewayTarget").input_shape,
+        )
+        self.assertEqual(
+            ["2026-07-28"],
+            create_gateway["protocolConfiguration"]["mcp"][
+                "supportedVersions"
+            ],
+        )
+
     def test_added_phoenix_data_ingests_with_temporal_semantics(self):
         before = self.evidence(
             entity="Phoenix", relationship="owner",
@@ -285,6 +492,15 @@ class VerticalSliceTests(unittest.TestCase):
                 build_orchestrator_runtime()
             with self.assertRaisesRegex(
                 RuntimeError, "TEMPORAL_FACTS_TABLE is required"
+            ):
+                build_tools_runtime()
+        with patch.dict(
+            "os.environ",
+            {"TEMPORAL_FACTS_TABLE": "temporal-facts"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "SOURCE_GATEWAY_URL is required"
             ):
                 build_tools_runtime()
 

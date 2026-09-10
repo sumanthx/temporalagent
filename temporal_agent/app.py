@@ -6,9 +6,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .mcp import MCPService
-from .models import SourceVersion
 from .orchestrator import AgentOrchestrator
-from .source import MockContentSource
+from .source import (
+    GatewayContentSource,
+    MockContentSource,
+    mock_source_from_payload,
+)
 from .tools import SharePointTools
 
 
@@ -21,17 +24,8 @@ class RuntimeApp:
 def load_mock_source(fixtures: Path | None = None) -> MockContentSource:
     root = fixtures or Path(__file__).parent.parent / "fixtures"
     raw = json.loads((root / "repository.json").read_text())
-    versions = [
-        SourceVersion(
-            document_id=v["document_id"], version_id=v["version_id"], title=v["title"],
-            path=v["path"], modified_at=v["modified_at"], valid_from=v["valid_from"],
-            content=v["content"], claims=tuple(v.get("claims", [])),
-            readers=frozenset(v["readers"]), deleted=v.get("deleted", False),
-            provenance=v.get("provenance", {}),
-        ) for v in raw["versions"]
-    ]
     events = [json.loads(line) for line in (root / "changes.jsonl").read_text().splitlines() if line]
-    return MockContentSource(versions, events)
+    return mock_source_from_payload(raw, events)
 
 
 def build_orchestrator_runtime() -> RuntimeApp:
@@ -48,8 +42,20 @@ def build_tools_runtime() -> RuntimeApp:
             "TEMPORAL_FACTS_TABLE is required for the MCP tools runtime"
         )
     from .aws_backend import DynamoTemporalGraphStore
+    from .gateway_client import GatewayMCPClient
 
-    source = load_mock_source()
+    gateway_url = os.environ.get("SOURCE_GATEWAY_URL")
+    if not gateway_url:
+        raise RuntimeError(
+            "SOURCE_GATEWAY_URL is required for the MCP tools runtime"
+        )
+    source = GatewayContentSource(GatewayMCPClient(
+        gateway_url=gateway_url,
+        user_pool_id=os.environ["SOURCE_GATEWAY_USER_POOL_ID"],
+        client_id=os.environ["SOURCE_GATEWAY_CLIENT_ID"],
+        token_url=os.environ["SOURCE_GATEWAY_TOKEN_URL"],
+        region=os.environ.get("AWS_REGION", "us-east-1"),
+    ))
     store = DynamoTemporalGraphStore(
         table_name, os.environ.get("AWS_REGION", "us-east-1"))
     store.load_all()
