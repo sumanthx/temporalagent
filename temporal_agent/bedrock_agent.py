@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import TYPE_CHECKING, Any
@@ -23,8 +24,10 @@ reconstructed from inaccessible sources.
 
 In the final answer, state the answer directly and include entity, relationship,
 valid interval, source artifact/version, and citation for each material claim.
-Clearly identify conflicts. Say when no currently accessible evidence supports
-the answer. Return only the final answer; never output thinking or reasoning tags.
+Copy valid-from and valid-to exactly from tool evidence. Never substitute
+recorded or modified timestamps for validity. Clearly identify every conflicting
+claim and its evidence. Say when no currently accessible evidence supports the
+answer. Return only the final answer; never output thinking or reasoning tags.
 """
 
 
@@ -46,6 +49,7 @@ class BedrockTemporalAgent:
     def ask(self, question: str, principal: Principal) -> dict:
         messages = [{"role": "user", "content": [{"text": question}]}]
         evidence: list[dict] = []
+        evidence_keys: set[str] = set()
         trace: list[dict] = []
         for _ in range(6):
             response = self.client.converse(
@@ -81,7 +85,11 @@ class BedrockTemporalAgent:
                 try:
                     value = self.tools.call(name, arguments, principal)
                     status = "success"
-                    evidence.extend(value.get("evidence", []))
+                    for item in value.get("evidence", []):
+                        key = json.dumps(item, sort_keys=True, default=str)
+                        if key not in evidence_keys:
+                            evidence_keys.add(key)
+                            evidence.append(item)
                 except Exception as exc:
                     value, status = {"error": str(exc)}, "error"
                 trace.append({"tool": name, "arguments": arguments, "status": status})
@@ -107,6 +115,17 @@ class BedrockTemporalAgent:
             }
             if relationship in aliases:
                 arguments["relationship"] = aliases[relationship]
+            for field in ("as_of", "changed_from", "changed_to"):
+                value = arguments.get(field)
+                if isinstance(value, str) and re.fullmatch(
+                    r"\d{4}-\d{2}-\d{2}", value
+                ):
+                    suffix = (
+                        "T00:00:00Z"
+                        if field == "changed_from"
+                        else "T23:59:59Z"
+                    )
+                    arguments[field] = value + suffix
         return arguments
 
     def _tool_specs(self) -> list[dict]:

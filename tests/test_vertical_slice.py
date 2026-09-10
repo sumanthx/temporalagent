@@ -234,7 +234,7 @@ class VerticalSliceTests(unittest.TestCase):
 
             def converse(self, **kwargs):
                 self.calls += 1
-                if self.calls == 1:
+                if self.calls <= 2:
                     names = {
                         tool["toolSpec"]["name"]
                         for tool in kwargs["toolConfig"]["tools"]
@@ -243,12 +243,12 @@ class VerticalSliceTests(unittest.TestCase):
                     return {"output": {"message": {
                         "role": "assistant",
                         "content": [{"toolUse": {
-                            "toolUseId": "tool-1",
+                            "toolUseId": f"tool-{self.calls}",
                             "name": "query_temporal_graph",
                             "input": {
                                 "entity": "Phoenix",
                                 "relationship": "owner",
-                                "as_of": "2025-08-01T23:59:59Z",
+                                "as_of": "2025-08-01",
                             },
                         }}],
                     }}}
@@ -267,6 +267,11 @@ class VerticalSliceTests(unittest.TestCase):
         ).invoke({"prompt": "Who owned Phoenix on 2025-08-01?"}, self.alice)
         self.assertEqual(set(self.app.tools.NAMES), client.assert_names)
         self.assertEqual("Erin", result["evidence"][0]["value"])
+        self.assertEqual(1, len(result["evidence"]))
+        self.assertEqual(
+            "2025-08-01T23:59:59Z",
+            result["tool_trace"][0]["arguments"]["as_of"],
+        )
         self.assertEqual("query_temporal_graph", result["tool_trace"][0]["tool"])
 
     def test_orchestrator_rejects_missing_prompt(self):
