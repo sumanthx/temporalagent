@@ -1,0 +1,9 @@
+FROM public.ecr.aws/docker/library/python:3.13-slim
+WORKDIR /app
+COPY pyproject.toml README.md ./
+RUN pip install --no-cache-dir boto3==1.42.0
+COPY temporal_agent ./temporal_agent
+COPY fixtures ./fixtures
+ENV PYTHONUNBUFFERED=1
+EXPOSE 8000
+CMD ["python", "-m", "temporal_agent.cli", "serve", "--port", "8000"]

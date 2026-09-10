@@ -1,0 +1,158 @@
+{
+  "versions": [
+    {
+      "document_id": "ownership-register",
+      "version_id": "1.0",
+      "title": "Application Ownership Register",
+      "path": "/Governance/Ownership Register.md",
+      "modified_at": "2024-01-03T09:00:00Z",
+      "valid_from": "2024-01-01T00:00:00Z",
+      "content": "Atlas owner: Alice",
+      "readers": ["alice", "bob", "governance"],
+      "claims": [
+        {"entity": "Atlas", "relationship": "owner", "value": "Alice"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "governance", "item_id": "101"}
+    },
+    {
+      "document_id": "ownership-register",
+      "version_id": "2.0",
+      "title": "Application Ownership Register",
+      "path": "/Governance/Application Owners.md",
+      "modified_at": "2024-03-10T09:00:00Z",
+      "valid_from": "2024-03-01T00:00:00Z",
+      "content": "Atlas owner: Bob\nRenamed from Ownership Register.md",
+      "readers": ["alice", "bob", "governance"],
+      "claims": [
+        {"entity": "Atlas", "relationship": "owner", "value": "Bob"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "governance", "item_id": "101", "rename_from": "/Governance/Ownership Register.md"}
+    },
+    {
+      "document_id": "retention-policy",
+      "version_id": "1.0",
+      "title": "Retention Policy",
+      "path": "/Policies/Retention.md",
+      "modified_at": "2024-02-15T12:00:00Z",
+      "valid_from": "2024-04-01T00:00:00Z",
+      "content": "Customer records retention: 7 years. Effective April 1.",
+      "readers": ["alice", "compliance"],
+      "claims": [
+        {"entity": "Customer Records", "relationship": "retention_period", "value": "7 years", "valid_from": "2024-04-01T00:00:00Z"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "policies", "item_id": "201"}
+    },
+    {
+      "document_id": "risk-register",
+      "version_id": "1.0",
+      "title": "Risk Register",
+      "path": "/Risk/Register.md",
+      "modified_at": "2024-02-01T10:00:00Z",
+      "valid_from": "2024-02-01T00:00:00Z",
+      "content": "Atlas classification: Medium",
+      "readers": ["alice", "risk"],
+      "claims": [
+        {"entity": "Atlas", "relationship": "risk", "value": "Medium"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "risk", "item_id": "301"}
+    },
+    {
+      "document_id": "risk-register",
+      "version_id": "2.0",
+      "title": "Risk Register",
+      "path": "/Risk/Register.md",
+      "modified_at": "2024-05-01T10:00:00Z",
+      "valid_from": "2024-02-01T00:00:00Z",
+      "content": "Atlas classification disputed: High",
+      "readers": ["alice", "risk"],
+      "claims": [
+        {"entity": "Atlas", "relationship": "risk", "value": "High"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "risk", "item_id": "301", "note": "conflicting correction"}
+    },
+    {
+      "document_id": "late-exception",
+      "version_id": "2.0",
+      "title": "Atlas Exception",
+      "path": "/Exceptions/Atlas.md",
+      "modified_at": "2024-06-02T10:00:00Z",
+      "valid_from": "2024-06-01T00:00:00Z",
+      "content": "Atlas exception status: closed",
+      "readers": ["alice", "compliance"],
+      "claims": [
+        {"entity": "Atlas", "relationship": "exception_status", "value": "closed"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "exceptions", "item_id": "401"}
+    },
+    {
+      "document_id": "late-exception",
+      "version_id": "1.0",
+      "title": "Atlas Exception",
+      "path": "/Exceptions/Atlas.md",
+      "modified_at": "2024-01-10T10:00:00Z",
+      "valid_from": "2024-01-01T00:00:00Z",
+      "content": "Atlas exception status: open",
+      "readers": ["alice", "compliance"],
+      "claims": [
+        {"entity": "Atlas", "relationship": "exception_status", "value": "open"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "exceptions", "item_id": "401", "late_arrival": true}
+    },
+    {
+      "document_id": "secret-plan",
+      "version_id": "1.0",
+      "title": "Secret Migration Plan",
+      "path": "/Restricted/Plan.md",
+      "modified_at": "2024-01-05T10:00:00Z",
+      "valid_from": "2024-01-05T00:00:00Z",
+      "content": "Orion migration owner: Alice",
+      "readers": ["alice", "security"],
+      "claims": [
+        {"entity": "Orion", "relationship": "owner", "value": "Alice"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "restricted", "item_id": "501"}
+    },
+    {
+      "document_id": "secret-plan",
+      "version_id": "2.0",
+      "title": "Secret Migration Plan",
+      "path": "/Restricted/Plan.md",
+      "modified_at": "2024-07-01T10:00:00Z",
+      "valid_from": "2024-07-01T00:00:00Z",
+      "content": "Orion migration owner: Alice. Access restricted.",
+      "readers": ["security"],
+      "claims": [
+        {"entity": "Orion", "relationship": "owner", "value": "Alice"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "restricted", "item_id": "501", "permission_change": true}
+    },
+    {
+      "document_id": "obsolete-procedure",
+      "version_id": "1.0",
+      "title": "Obsolete Procedure",
+      "path": "/Procedures/Old.md",
+      "modified_at": "2024-01-02T10:00:00Z",
+      "valid_from": "2024-01-01T00:00:00Z",
+      "content": "Legacy approval owner: Carol",
+      "readers": ["alice", "operations"],
+      "claims": [
+        {"entity": "Legacy Approval", "relationship": "owner", "value": "Carol"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "procedures", "item_id": "601"}
+    },
+    {
+      "document_id": "obsolete-procedure",
+      "version_id": "deleted",
+      "title": "Obsolete Procedure",
+      "path": "/Procedures/Old.md",
+      "modified_at": "2024-08-01T10:00:00Z",
+      "valid_from": "2024-08-01T00:00:00Z",
+      "content": "",
+      "readers": [],
+      "deleted": true,
+      "claims": [],
+      "provenance": {"site_id": "mock-site", "list_id": "procedures", "item_id": "601", "deletion": true}
+    }
+  ]
+}
+
