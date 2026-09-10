@@ -5,33 +5,20 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from .clock import LogicalClock
-from .ingestion import ChangeIngester
 from .mcp import MCPService
 from .models import SourceVersion
 from .orchestrator import AgentOrchestrator
 from .source import MockContentSource
-from .store import TemporalGraphStore
 from .tools import SharePointTools
 
 
 @dataclass
-class DemoApp:
-    source: MockContentSource
-    store: TemporalGraphStore
-    ingester: ChangeIngester
-    tools: SharePointTools
-    orchestrator: AgentOrchestrator
-    mcp: MCPService
+class RuntimeApp:
+    orchestrator: AgentOrchestrator | None = None
+    mcp: MCPService | None = None
 
 
-def build_demo(fixtures: Path | None = None) -> DemoApp:
-    if os.environ.get("RUNTIME_KIND") == "orchestrator":
-        from .remote_mcp import RemoteMCPTools
-        tools = RemoteMCPTools()
-        return DemoApp(
-            source=None, store=None, ingester=None, tools=tools,
-            orchestrator=AgentOrchestrator(tools), mcp=None)
+def load_mock_source(fixtures: Path | None = None) -> MockContentSource:
     root = fixtures or Path(__file__).parent.parent / "fixtures"
     raw = json.loads((root / "repository.json").read_text())
     versions = [
@@ -44,19 +31,27 @@ def build_demo(fixtures: Path | None = None) -> DemoApp:
         ) for v in raw["versions"]
     ]
     events = [json.loads(line) for line in (root / "changes.jsonl").read_text().splitlines() if line]
-    source = MockContentSource(versions, events)
+    return MockContentSource(versions, events)
+
+
+def build_orchestrator_runtime() -> RuntimeApp:
+    from .remote_mcp import RemoteMCPTools
+
+    tools = RemoteMCPTools()
+    return RuntimeApp(orchestrator=AgentOrchestrator(tools))
+
+
+def build_tools_runtime() -> RuntimeApp:
     table_name = os.environ.get("TEMPORAL_FACTS_TABLE")
-    if table_name:
-        from .aws_backend import DynamoTemporalGraphStore
-        store = DynamoTemporalGraphStore(
-            table_name, os.environ.get("AWS_REGION", "us-east-1"))
-        store.load_all()
-    else:
-        store = TemporalGraphStore()
-    clock = LogicalClock()
-    ingester = ChangeIngester(source, store, clock)
-    tools = SharePointTools(source, store)
-    app = DemoApp(source, store, ingester, tools, AgentOrchestrator(tools), MCPService(tools))
     if not table_name:
-        ingester.replay()
-    return app
+        raise RuntimeError(
+            "TEMPORAL_FACTS_TABLE is required for the MCP tools runtime"
+        )
+    from .aws_backend import DynamoTemporalGraphStore
+
+    source = load_mock_source()
+    store = DynamoTemporalGraphStore(
+        table_name, os.environ.get("AWS_REGION", "us-east-1"))
+    store.load_all()
+    tools = SharePointTools(source, store)
+    return RuntimeApp(mcp=MCPService(tools))

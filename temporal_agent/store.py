@@ -6,14 +6,14 @@ from .models import MAX_TIME, SourceVersion, TemporalRecord
 
 
 class TemporalGraphStore:
-    """Append-oriented local substitute for the DynamoDB temporal fact store."""
+    """Append-oriented in-memory test substitute for the DynamoDB fact store."""
 
     def __init__(self):
         self.records: list[TemporalRecord] = []
         self.ingested_events: set[str] = set()
 
     def refresh(self) -> None:
-        """Refresh an external projection; local fixture stores are already current."""
+        """Refresh an external projection; in-memory test data is already current."""
 
     def ingest(self, version: SourceVersion, recorded_at: str, event_id: str) -> None:
         if event_id in self.ingested_events:

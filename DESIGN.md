@@ -1,6 +1,6 @@
 # SharePoint Temporal Query Agent — Design
 
-Status: implemented local vertical slice and AWS deployment boundary
+Status: implemented AWS AgentCore vertical slice
 Last updated: 2026-09-10
 Source status: SharePoint and Microsoft Graph are mocked
 
@@ -23,7 +23,6 @@ tools remain authoritative for facts and access decisions.
 
 Implemented:
 
-- local deterministic demo
 - Bedrock-powered AgentCore orchestrator
 - separate MCP tools runtime
 - mock current search, exact versions, delta events and authorization
@@ -31,6 +30,7 @@ Implemented:
 - SQS/Lambda ingestion with event idempotency
 - DynamoDB and S3 persistence boundaries
 - Cognito workload authentication
+- test-only fixture harness for deterministic temporal semantics
 
 Not implemented:
 
@@ -84,6 +84,10 @@ runtime configuration selects `runtime_agent.py` for HTTP and
 `runtime_tools.py` for MCP. The MCP process still satisfies the AgentCore
 contract by listening on `0.0.0.0:8000/mcp`. No container build is required.
 
+There is no local application mode. The orchestrator always invokes Bedrock and
+always reaches tools through the separate authenticated MCP runtime. No
+deterministic parser or in-process tool fallback exists in the runtime code.
+
 ### 3.2 Shared artifact boundary
 
 | Consumer | Artifact configuration |
@@ -135,8 +139,8 @@ conversational model.
 The deployed worker repairs valid-time ordering after each insert and runs with
 one reserved concurrent execution for deterministic fixture replay. Production
 ingestion must make those repairs transactional and close superseded
-`recorded_to` intervals. The local materializer uses the same valid-time
-semantics for deterministic testing.
+`recorded_to` intervals. A test-only in-memory materializer exercises the same
+valid-time semantics without acting as an application runtime.
 
 Queries read the latest completed DynamoDB state and do not wait for ingestion.
 
@@ -333,6 +337,8 @@ The holistic review removed components that had no current consumer:
 - AgentCore Gateway claims and the unused Gateway Lambda handler
 - the hidden `ask_temporal` pseudo-tool
 - Neptune seeding scripts that projected no useful multi-hop ontology
+- the combined local server and CLI `ask` command
+- the deterministic natural-language parser and local fallback
 
 These can return only when backed by a concrete tool and tested request path.
 
@@ -341,7 +347,7 @@ These can return only when backed by a concrete tool and tested request path.
 | Failure | Behavior |
 |---|---|
 | Duplicate source event | Source-state conditional write skips it |
-| Out-of-order local event | Materializer repairs valid-time ordering |
+| Out-of-order source event | Materializer repairs valid-time ordering |
 | Deleted source | Tombstone retained; access fails closed |
 | Permission removed | Historical evidence is filtered immediately |
 | MCP unavailable | Orchestrator fails rather than bypassing tools |
@@ -361,14 +367,16 @@ The suite covers:
 - deletion and tombstones
 - exact-version comparison
 - MCP allow-list enforcement
-- natural-language orchestration
-- Bedrock tool selection
+- Bedrock tool selection and orchestrator delegation using a fake model client
 
 Run:
 
 ```bash
 python3 -m unittest discover -v
 ```
+
+The suite is a test harness only. Supported execution begins with the deployed
+AgentCore HTTP runtime.
 
 ## 15. Production completion path
 

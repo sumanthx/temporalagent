@@ -152,7 +152,76 @@
       "deleted": true,
       "claims": [],
       "provenance": {"site_id": "mock-site", "list_id": "procedures", "item_id": "601", "deletion": true}
+    },
+    {
+      "document_id": "phoenix-ownership",
+      "version_id": "1.0",
+      "title": "Phoenix Ownership Register",
+      "path": "/Governance/Phoenix Ownership.md",
+      "modified_at": "2025-01-03T09:00:00Z",
+      "valid_from": "2025-01-01T00:00:00Z",
+      "content": "Phoenix owner: Dana",
+      "readers": ["alice", "governance"],
+      "claims": [
+        {"entity": "Phoenix", "relationship": "owner", "value": "Dana"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "governance", "item_id": "701"}
+    },
+    {
+      "document_id": "phoenix-ownership",
+      "version_id": "2.0",
+      "title": "Phoenix Ownership Register",
+      "path": "/Governance/Phoenix Ownership.md",
+      "modified_at": "2025-06-20T09:00:00Z",
+      "valid_from": "2025-07-01T00:00:00Z",
+      "content": "Phoenix owner: Erin. Effective July 1.",
+      "readers": ["alice", "governance"],
+      "claims": [
+        {"entity": "Phoenix", "relationship": "owner", "value": "Erin"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "governance", "item_id": "701", "note": "scheduled ownership transfer"}
+    },
+    {
+      "document_id": "phoenix-retention-policy",
+      "version_id": "1.0",
+      "title": "Phoenix Records Retention Policy",
+      "path": "/Policies/Phoenix Retention.md",
+      "modified_at": "2026-08-15T12:00:00Z",
+      "valid_from": "2026-10-01T00:00:00Z",
+      "content": "Phoenix records retention: 5 years. Effective October 1, 2026.",
+      "readers": ["alice", "compliance"],
+      "claims": [
+        {"entity": "Phoenix Records", "relationship": "retention_period", "value": "5 years", "valid_from": "2026-10-01T00:00:00Z"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "policies", "item_id": "702", "approval": "records-board"}
+    },
+    {
+      "document_id": "phoenix-risk-register",
+      "version_id": "1.0",
+      "title": "Phoenix Risk Register",
+      "path": "/Risk/Phoenix.md",
+      "modified_at": "2025-03-02T10:00:00Z",
+      "valid_from": "2025-03-01T00:00:00Z",
+      "content": "Phoenix classification: Low",
+      "readers": ["alice", "risk"],
+      "claims": [
+        {"entity": "Phoenix", "relationship": "risk", "value": "Low"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "risk", "item_id": "703", "assessment": "operations"}
+    },
+    {
+      "document_id": "phoenix-risk-register",
+      "version_id": "2.0",
+      "title": "Phoenix Risk Register",
+      "path": "/Risk/Phoenix.md",
+      "modified_at": "2025-08-15T10:00:00Z",
+      "valid_from": "2025-03-01T00:00:00Z",
+      "content": "Phoenix classification disputed: High",
+      "readers": ["alice", "risk"],
+      "claims": [
+        {"entity": "Phoenix", "relationship": "risk", "value": "High"}
+      ],
+      "provenance": {"site_id": "mock-site", "list_id": "risk", "item_id": "703", "assessment": "security", "note": "conflicting assessment"}
     }
   ]
 }
-

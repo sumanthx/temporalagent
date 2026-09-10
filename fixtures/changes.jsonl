@@ -9,4 +9,8 @@
 {"event_id":"evt-009","recorded_at":"2024-07-01T10:05:00Z","document_id":"secret-plan","version_id":"2.0","kind":"permission-change"}
 {"event_id":"evt-010","recorded_at":"2024-07-02T10:05:00Z","document_id":"obsolete-procedure","version_id":"1.0","kind":"backfill"}
 {"event_id":"evt-011","recorded_at":"2024-08-01T10:05:00Z","document_id":"obsolete-procedure","version_id":"deleted","kind":"deleted"}
-
+{"event_id":"evt-012","recorded_at":"2025-01-03T09:05:00Z","document_id":"phoenix-ownership","version_id":"1.0","kind":"updated"}
+{"event_id":"evt-013","recorded_at":"2025-03-02T10:05:00Z","document_id":"phoenix-risk-register","version_id":"1.0","kind":"updated"}
+{"event_id":"evt-014","recorded_at":"2025-06-20T09:05:00Z","document_id":"phoenix-ownership","version_id":"2.0","kind":"scheduled-update"}
+{"event_id":"evt-015","recorded_at":"2025-08-15T10:05:00Z","document_id":"phoenix-risk-register","version_id":"2.0","kind":"conflicting-assessment"}
+{"event_id":"evt-016","recorded_at":"2026-09-01T12:05:00Z","document_id":"phoenix-retention-policy","version_id":"1.0","kind":"approved"}

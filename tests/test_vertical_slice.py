@@ -1,16 +1,39 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
-from temporal_agent.app import build_demo
+from temporal_agent.app import (
+    build_orchestrator_runtime,
+    build_tools_runtime,
+    load_mock_source,
+)
 from temporal_agent.bedrock_agent import BedrockTemporalAgent
+from temporal_agent.clock import LogicalClock
+from temporal_agent.ingestion import ChangeIngester
+from temporal_agent.mcp import MCPService
 from temporal_agent.models import MAX_TIME, Principal
+from temporal_agent.orchestrator import AgentOrchestrator
 from temporal_agent.server import principal_from_headers
+from temporal_agent.store import TemporalGraphStore
+from temporal_agent.tools import SharePointTools
 from aws_lambda.handlers import _repair_valid_intervals
 from scripts.deploy_runtimes import build_code_artifact
 
 
 class VerticalSliceTests(unittest.TestCase):
     def setUp(self):
-        self.app = build_demo()
+        source = load_mock_source()
+        store = TemporalGraphStore()
+        ingester = ChangeIngester(source, store, LogicalClock())
+        tools = SharePointTools(source, store)
+        ingester.replay()
+        self.app = SimpleNamespace(
+            source=source,
+            store=store,
+            ingester=ingester,
+            tools=tools,
+            mcp=MCPService(tools),
+        )
         self.alice = Principal("alice")
 
     def evidence(self, **kwargs):
@@ -127,44 +150,45 @@ class VerticalSliceTests(unittest.TestCase):
     def test_delta_cursor_and_idempotent_replay(self):
         before = len(self.app.store.records)
         cursor = self.app.ingester.replay()
-        self.assertEqual("11", cursor)
+        self.assertEqual("16", cursor)
         self.assertEqual(before, len(self.app.store.records))
 
-    def test_natural_language_orchestrator(self):
-        result = self.app.orchestrator.invoke(
-            {"prompt": "Who owned Atlas on 2024-02-01?"},
-            principal=self.alice,
+    def test_added_phoenix_data_ingests_with_temporal_semantics(self):
+        before = self.evidence(
+            entity="Phoenix", relationship="owner",
+            as_of="2025-02-01T00:00:00Z",
         )
-        self.assertIn("Alice", result["answer"])
-        self.assertIn("sharepoint://ownership-register/versions/1.0",
-                      result["answer"])
-        self.assertEqual("2024-03-01T00:00:00Z",
-                         result["evidence"][0]["validity"]["to"])
-
-    def test_documented_orchestrator_prompts(self):
-        owned = self.app.orchestrator.invoke(
-            {"prompt": "Who owned Atlas on 2024-02-01?"}, self.alice)
-        self.assertEqual(["Alice"], [e["value"] for e in owned["evidence"]])
-
-        not_effective = self.app.orchestrator.invoke(
-            {"prompt": (
-                "What was the retention policy about Customer Records "
-                "on 2024-03-15?"
-            )},
-            self.alice,
+        after = self.evidence(
+            entity="Phoenix", relationship="owner",
+            as_of="2025-08-01T00:00:00Z",
         )
-        self.assertEqual([], not_effective["evidence"])
-
-        effective = self.app.orchestrator.invoke(
-            {"prompt": (
-                "What was the retention policy about Customer Records "
-                "on 2024-04-02?"
-            )},
-            self.alice,
+        self.assertEqual(["Dana"], [row["value"] for row in before])
+        self.assertEqual(["Erin"], [row["value"] for row in after])
+        self.assertEqual(
+            "2025-07-01T00:00:00Z",
+            before[0]["validity"]["to"],
         )
-        self.assertEqual(["7 years"], [
-            e["value"] for e in effective["evidence"]
-        ])
+
+        not_effective = self.evidence(
+            entity="Phoenix Records", relationship="retention_period",
+            as_of="2026-09-15T00:00:00Z",
+        )
+        effective = self.evidence(
+            entity="Phoenix Records", relationship="retention_period",
+            as_of="2026-10-02T00:00:00Z",
+        )
+        self.assertEqual([], not_effective)
+        self.assertEqual(["5 years"], [row["value"] for row in effective])
+        self.assertEqual(
+            "2026-08-15T12:00:00Z",
+            effective[0]["provenance"]["modified_at"],
+        )
+
+        risks = self.evidence(
+            entity="Phoenix", relationship="risk",
+            as_of="2025-04-01T00:00:00Z",
+        )
+        self.assertEqual({"Low", "High"}, {row["value"] for row in risks})
 
     def test_agentcore_custom_principal_headers(self):
         headers = {
@@ -221,24 +245,42 @@ class VerticalSliceTests(unittest.TestCase):
                             "toolUseId": "tool-1",
                             "name": "query_temporal_graph",
                             "input": {
-                                "entity": "Atlas",
+                                "entity": "Phoenix",
                                 "relationship": "owner",
-                                "as_of": "2024-02-01T23:59:59Z",
+                                "as_of": "2025-08-01T23:59:59Z",
                             },
                         }}],
                     }}}
                 return {"output": {"message": {
                     "role": "assistant",
-                    "content": [{"text": "Atlas was owned by Alice with cited evidence."}],
+                    "content": [{"text": (
+                        "Phoenix was owned by Erin with cited evidence."
+                    )}],
                 }}}
 
         client = FakeBedrock()
-        result = BedrockTemporalAgent(
-            self.app.tools, model_id="fake-model", client=client
-        ).ask("Who owned Atlas on 2024-02-01?", self.alice)
+        model_agent = BedrockTemporalAgent(
+            self.app.tools, model_id="fake-model", client=client)
+        result = AgentOrchestrator(
+            self.app.tools, agent=model_agent
+        ).invoke({"prompt": "Who owned Phoenix on 2025-08-01?"}, self.alice)
         self.assertEqual(set(self.app.tools.NAMES), client.assert_names)
-        self.assertEqual("Alice", result["evidence"][0]["value"])
+        self.assertEqual("Erin", result["evidence"][0]["value"])
         self.assertEqual("query_temporal_graph", result["tool_trace"][0]["tool"])
+
+    def test_orchestrator_rejects_missing_prompt(self):
+        orchestrator = AgentOrchestrator(self.app.tools, agent=object())
+        with self.assertRaises(ValueError):
+            orchestrator.invoke({}, self.alice)
+
+    def test_runtime_builders_have_no_local_fallback(self):
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(KeyError):
+                build_orchestrator_runtime()
+            with self.assertRaisesRegex(
+                RuntimeError, "TEMPORAL_FACTS_TABLE is required"
+            ):
+                build_tools_runtime()
 
 
 if __name__ == "__main__":

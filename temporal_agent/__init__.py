@@ -1,6 +1,5 @@
-"""SharePoint temporal-query agent vertical slice."""
+"""SharePoint temporal-query agent runtime."""
 
-from .app import build_demo
+from .app import build_orchestrator_runtime, build_tools_runtime
 
-__all__ = ["build_demo"]
-
+__all__ = ["build_orchestrator_runtime", "build_tools_runtime"]

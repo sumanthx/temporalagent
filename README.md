@@ -1,6 +1,6 @@
 # SharePoint Temporal Query Agent
 
-A local and AWS-deployable vertical slice for natural-language questions about
+An AWS-deployed AgentCore application for natural-language questions about
 current and historical SharePoint-like content. SharePoint and Microsoft Graph
 are mocked behind a swappable `ContentSource` boundary.
 
@@ -47,6 +47,11 @@ The ZIP contains application code, fixtures, Lambda code and Linux ARM64
 dependencies. AgentCore starts the selected entrypoint; Lambda uses the handler
 from the same artifact.
 
+Natural-language requests always use Amazon Bedrock. There is no deterministic
+planner, combined local server, or local `ask` command. If Bedrock or the MCP
+runtime is unavailable, the request fails instead of switching to a local
+fallback.
+
 ## Temporal and security behavior
 
 - Facts carry `valid_from`, `valid_to`, `recorded_from`, and `recorded_to`.
@@ -67,27 +72,20 @@ The MCP runtime exposes exactly six tools:
 - `compare_document_versions`
 - `check_access`
 
-## Run locally
+## Verify before deployment
 
 Requirements:
 
 - Python 3.11 or newer
-- No AWS credentials or third-party packages for fixture mode
+- Project dependencies installed with `python3 -m pip install -e .`
 
 ```bash
 python3 -m unittest discover -v
 ```
 
-```bash
-python3 -m temporal_agent.cli ask \
-  "Who owned Atlas on 2024-02-01?"
-```
-
-Start the combined local development server:
-
-```bash
-python3 -m temporal_agent.cli serve --port 8080
-```
+The tests use fixtures and fake AWS/Bedrock boundaries to verify temporal
+semantics without starting an application runtime. They are not a supported
+local execution mode.
 
 ## Deploy to AWS
 
@@ -141,6 +139,12 @@ python3 scripts/ask_aws.py \
 | `What was the exception status about Atlas on 2024-03-01?` | Late-arriving `open` claim |
 | `Who owned Orion on 2024-02-01?` | No evidence because current access was revoked |
 | `Who was the owner of Legacy Approval as of 2024-02-01?` | No evidence because the source is deleted |
+| `Who owned Phoenix on 2025-02-01?` | Dana, version 1.0 |
+| `Who owned Phoenix on 2025-08-01?` | Erin, version 2.0 |
+| `What changed about Phoenix between 2025-06-01 and 2025-08-01?` | Ownership transferred to Erin |
+| `What was the retention policy about Phoenix Records on 2026-09-15?` | No effective policy yet |
+| `What was the retention policy about Phoenix Records on 2026-10-02?` | Five years, effective October 1 |
+| `What was the risk about Phoenix on 2025-04-01?` | Both Low and High conflicting assessments |
 
 ## Authentication assumption
 
@@ -169,8 +173,8 @@ The source-state table makes event handling idempotent. The deployed Lambda
 repairs valid-time intervals after inserts. Production still needs transactional
 updates and complete recorded-time interval closure.
 
-Local tests replay the same stream synchronously with a controllable logical
-clock.
+Unit tests replay the same stream through a test-only in-memory store with a
+controllable logical clock.
 
 ## Fixtures
 
@@ -206,6 +210,8 @@ DynamoDB and S3 remain authoritative; Neptune is a rebuildable projection. See
 - AgentCore Gateway: the application already has explicit orchestrator and MCP
   runtime boundaries.
 - Docker, ECR and CodeBuild: both AgentCore runtimes use CodeZip.
+- The combined local server, CLI `ask` command and deterministic parser:
+  deployed natural-language requests always use Bedrock.
 - Production Microsoft Graph and Entra integration: retained as interfaces and
   documented production work.
 

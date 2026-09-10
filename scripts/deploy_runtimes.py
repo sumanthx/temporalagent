@@ -91,7 +91,6 @@ def main() -> None:
         ),
         {
             "AWS_REGION": args.region,
-            "RUNTIME_KIND": "tools",
             "TEMPORAL_FACTS_TABLE": args.table,
         },
     )
@@ -108,7 +107,6 @@ def main() -> None:
         ),
         {
             "AWS_REGION": args.region,
-            "RUNTIME_KIND": "orchestrator",
             "BEDROCK_AGENT_MODEL_ID": "amazon.nova-lite-v1:0",
             "MCP_RUNTIME_ARN": tools_arn,
             "MCP_USER_POOL_ID": args.user_pool_id,
